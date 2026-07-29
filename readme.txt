@@ -4,7 +4,7 @@ Tags: telegram, bale, linkedin, openai, automation, content
 Requires at least: 6.5
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 1.0.0
+Stable tag: 1.0.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -24,6 +24,9 @@ LinkedIn فقط با OAuth و API رسمی پیاده‌سازی شده و مح�
 4. Run `wp mrn-content-bridge worker --loop --sleep=5` under a process supervisor.
 
 == Changelog ==
+
+= 1.0.1 =
+* Fixed WordPress admin gutter interaction and horizontal overflow in the Content Bridge RTL panel.
 
 = 1.0.0 =
 * Initial modular release.

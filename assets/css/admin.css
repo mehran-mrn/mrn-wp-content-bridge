@@ -12,13 +12,31 @@
 	--mcb-shadow: 0 10px 35px rgb(27 62 51 / 7%);
 }
 
+/* WordPress keeps a physical 20px left gutter on #wpcontent. The bridge
+ * supplies its own responsive gutter, so retaining both shifts the full-bleed
+ * header and can make the admin canvas wider than the viewport. */
+.toplevel_page_mrncb-dashboard #wpcontent,
+[class*="_page_mrncb-"] #wpcontent {
+	padding-left: 0;
+}
+
 .mrncb-wrap {
-	margin: 0 0 0 -20px;
+	box-sizing: border-box;
+	width: 100%;
+	max-width: 100%;
+	margin: 0;
 	padding: 0 28px 48px;
+	overflow-x: clip;
 	background: var(--mcb-bg);
 	min-height: calc(100vh - 32px);
 	color: var(--mcb-ink);
 	font-family: Vazirmatn, IRANSansX, Tahoma, sans-serif;
+}
+
+.mrncb-wrap *,
+.mrncb-wrap *::before,
+.mrncb-wrap *::after {
+	box-sizing: border-box;
 }
 
 .mrncb-hero {
@@ -69,7 +87,7 @@
 .mrncb-nav a:hover,
 .mrncb-nav a.is-active { color: var(--mcb-green); border-color: var(--mcb-green); }
 
-.mrncb-main { max-width: 1440px; margin: auto; }
+.mrncb-main { width: 100%; max-width: 1440px; min-width: 0; margin: auto; }
 .mrncb-section-head { justify-content: space-between; gap: 20px; margin: 0 0 20px; }
 .mrncb-section-head h2 { margin: 0; color: var(--mcb-ink); font-size: 23px; }
 .mrncb-section-head p { margin: 5px 0 0; color: var(--mcb-muted); }
@@ -170,7 +188,7 @@
 	.mrncb-tools { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 782px) {
-	.mrncb-wrap { margin-right: -10px; padding: 0 14px 40px; }
+	.mrncb-wrap { padding: 0 14px 40px; }
 	.mrncb-hero { margin: 0 -14px; padding: 20px 16px; }
 	.mrncb-health { display: none; }
 	.mrncb-nav { margin: 0 -14px 22px; padding: 0 10px; }
