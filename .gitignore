@@ -1,0 +1,8 @@
+/vendor/
+/.phpunit.cache/
+/.phpcs-cache
+/*.zip
+/dist/
+/.idea/
+/.vscode/
+Thumbs.db
