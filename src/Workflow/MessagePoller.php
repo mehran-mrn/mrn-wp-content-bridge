@@ -41,6 +41,16 @@ final class MessagePoller {
 					if ( '' !== (string) $source->chat_id && (string) $source->chat_id !== $update->chat_id ) {
 						continue;
 					}
+					$existing = $wpdb->get_var(
+						$wpdb->prepare(
+							"SELECT id FROM {$wpdb->prefix}mrncb_messages WHERE source_id = %d AND update_id = %d LIMIT 1",
+							(int) $source->id,
+							$update->update_id
+						)
+					);
+					if ( $existing ) {
+						continue;
+					}
 					$inserted = $wpdb->insert(
 						$wpdb->prefix . 'mrncb_messages',
 						array(
@@ -56,11 +66,28 @@ final class MessagePoller {
 							'received_at'         => current_time( 'mysql', true ),
 						)
 					);
-					if ( $inserted ) {
-						$delay = $update->media_group_id ? (int) $this->settings->get( 'media_group_wait', 8 ) : 0;
-						$this->queue->dispatch( 'import_message', array( 'message_id' => (int) $wpdb->insert_id ), $delay, 5 );
-						++$count;
+					if ( false === $inserted ) {
+						$duplicate = $wpdb->get_var(
+							$wpdb->prepare(
+								"SELECT id FROM {$wpdb->prefix}mrncb_messages WHERE source_id = %d AND update_id = %d LIMIT 1",
+								(int) $source->id,
+								$update->update_id
+							)
+						);
+						if ( $duplicate ) {
+							continue;
+						}
+						throw new \RuntimeException( 'ذخیره پیام ورودی ناموفق بود: ' . ( $wpdb->last_error ?: 'خطای ناشناخته دیتابیس' ) );
 					}
+					$message_id = (int) $wpdb->insert_id;
+					$delay      = $update->media_group_id ? (int) $this->settings->get( 'media_group_wait', 8 ) : 0;
+					try {
+						$this->queue->dispatch( 'import_message', array( 'message_id' => $message_id ), $delay, 5 );
+					} catch ( \Throwable $error ) {
+						$wpdb->delete( $wpdb->prefix . 'mrncb_messages', array( 'id' => $message_id ) );
+						throw $error;
+					}
+					++$count;
 				}
 				$this->entities->update_source_poll( (int) $source->id, $max_update );
 			} catch ( \Throwable $error ) {

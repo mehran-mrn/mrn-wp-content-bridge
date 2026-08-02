@@ -137,6 +137,18 @@ abstract class AbstractBotApiAdapter implements PlatformAdapterInterface {
 		return $tmp;
 	}
 
+	public function answer_callback( object $source, string $callback_id, string $text = '' ): void {
+		$credentials = $this->entities->credentials( $source );
+		$this->request(
+			(string) ( $credentials['token'] ?? '' ),
+			'answerCallbackQuery',
+			array(
+				'callback_query_id' => $callback_id,
+				'text'              => mb_substr( wp_strip_all_tags( $text ), 0, 180 ),
+			)
+		);
+	}
+
 	/** @param array<string, mixed> $raw */
 	protected function normalize( array $raw ): ?NormalizedUpdate {
 		$update_id = (int) ( $raw['update_id'] ?? 0 );

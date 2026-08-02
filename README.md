@@ -2,7 +2,7 @@
 
 افزونه مستقل و ماژولار وردپرس برای دریافت محتوا از Telegram و Bale، پردازش مستقیم یا هوشمند، ساخت نوشته وردپرس، تأیید انسانی و انتشار دوباره مطالب سایت در شبکه‌های اجتماعی.
 
-نسخه فعلی: `1.0.1`
+نسخه فعلی: `1.2.2`
 
 حداقل وردپرس: `6.5`
 
@@ -27,6 +27,7 @@
 - انتشار idempotent و مستقل برای هر مقصد؛ شکست یک مقصد مانع بقیه نیست
 - LinkedIn OAuth 2.0، Images API و Posts API رسمی
 - پنل RTL واکنش‌گرا برای Dashboard، Sources، Destinations، Workflows، Approval Queue، Jobs، Logs، AI Providers، Settings و Tools
+- رابط مدیریت دوزبانه: فارسی/RTL و انگلیسی/LTR بر اساس زبان کاربر وردپرس
 
 ## نصب
 
@@ -110,3 +111,7 @@ composer test
 ## مجوز
 
 GPL-2.0-or-later
+
+## سازنده
+
+[Mehran Marandi](https://mehranmarandi.ir)

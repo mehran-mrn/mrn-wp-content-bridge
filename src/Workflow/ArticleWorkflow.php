@@ -23,7 +23,9 @@ final class ArticleWorkflow {
 		private readonly ProviderRegistry $providers,
 		private readonly MediaImporter $media,
 		private readonly JobQueue $queue,
-		private readonly Settings $settings
+		private readonly Settings $settings,
+		private readonly ApprovalService $approvals,
+		private readonly TitleExtractor $titles
 	) {}
 
 	public function import_message( int $message_id ): void {
@@ -35,7 +37,18 @@ final class ArticleWorkflow {
 		}
 
 		if ( 'callback' === $message->message_type ) {
-			do_action( 'mrncb_approval_callback', $message );
+			$this->approvals->handle_callback_message( $message );
+			$wpdb->update(
+				$messages_table,
+				array(
+					'status'       => 'processed',
+					'processed_at' => current_time( 'mysql', true ),
+				),
+				array( 'id' => $message_id )
+			);
+			return;
+		}
+		if ( $this->approvals->handle_command_message( $message ) ) {
 			$wpdb->update(
 				$messages_table,
 				array(
@@ -66,19 +79,42 @@ final class ArticleWorkflow {
 		if ( $existing ) {
 			return;
 		}
-		$now = current_time( 'mysql', true );
+		$source         = $this->entities->source( (int) $message->source_id );
+		$source_config  = $source ? $this->entities->config( $source ) : array();
+		$needs_approval = ! array_key_exists( 'confirm_inbound', $source_config ) || ! empty( $source_config['confirm_inbound'] );
+		$payload        = json_decode( (string) $message->payload, true ) ?: array();
+		$sender         = (array) ( $payload['message']['from'] ?? $payload['message']['sender_chat'] ?? array() );
+		$now            = current_time( 'mysql', true );
 		$wpdb->insert(
 			$workflow_table,
 			array(
 				'source_id'         => (int) $message->source_id,
 				'source_message_id' => $message_id,
-				'status'            => 'queued',
-				'context'           => wp_json_encode( array( 'message_ids' => array_map( static fn( $item ) => (int) $item->id, $group ) ) ),
+				'status'            => $needs_approval ? 'awaiting_confirmation' : 'queued',
+				'context'           => wp_json_encode(
+					array(
+						'message_ids'       => array_map( static fn( $item ) => (int) $item->id, $group ),
+						'submitter_user_id' => (string) ( $sender['id'] ?? '' ),
+						'submitter_chat_id' => (string) $message->chat_id,
+					),
+					JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+				),
 				'created_at'        => $now,
 				'updated_at'        => $now,
 			)
 		);
-		$this->queue->dispatch( 'generate_article', array( 'workflow_id' => (int) $wpdb->insert_id ), 0, 4 );
+		$workflow_id = (int) $wpdb->insert_id;
+		$this->queue->dispatch(
+			$needs_approval ? 'request_intake_confirmation' : 'generate_article',
+			array( 'workflow_id' => $workflow_id ),
+			0,
+			4
+		);
+		if ( $needs_approval ) {
+			foreach ( $group as $group_message ) {
+				$wpdb->update( $messages_table, array( 'status' => 'awaiting_confirmation' ), array( 'id' => (int) $group_message->id ) );
+			}
+		}
 	}
 
 	public function generate_article( int $workflow_id ): void {
@@ -107,7 +143,7 @@ final class ArticleWorkflow {
 			: $this->direct_result( $text );
 
 		$context['article']       = array(
-			'title'                 => $result->title ?: wp_trim_words( wp_strip_all_tags( $text ), 12, '…' ),
+			'title'                 => $this->titles->normalize( $result->title, $text ),
 			'excerpt'               => $result->excerpt,
 			'content_html'          => wp_kses_post( $result->content_html ),
 			'categories'            => array_map( 'sanitize_text_field', $result->categories ),
@@ -304,11 +340,13 @@ final class ArticleWorkflow {
 			set_post_thumbnail( $post_id, $attachment_id );
 			return;
 		}
+		$poster_id = $this->media->poster_id( $attachment_id );
+		if ( $poster_id && ! has_post_thumbnail( $post_id ) ) {
+			set_post_thumbnail( $post_id, $poster_id );
+		}
 
 		$content = (string) get_post_field( 'post_content', $post_id );
-		$block   = wp_attachment_is_image( $attachment_id )
-			? '<figure class="wp-block-image size-large">' . wp_get_attachment_image( $attachment_id, 'large' ) . '</figure>'
-			: wp_get_attachment_link( $attachment_id );
+		$block   = $this->media->content_block( $attachment_id );
 		wp_update_post(
 			array(
 				'ID'           => $post_id,
@@ -341,7 +379,7 @@ final class ArticleWorkflow {
 		$updated  = wp_update_post(
 			array(
 				'ID'           => (int) $workflow->post_id,
-				'post_title'   => $result->title,
+				'post_title'   => $this->titles->normalize( $result->title, $text ),
 				'post_excerpt' => $result->excerpt,
 				'post_content' => wp_kses_post( $result->content_html ),
 				'post_status'  => 'pending',
@@ -587,7 +625,7 @@ final class ArticleWorkflow {
 	private function direct_result( string $text ): TextGenerationResult {
 		$paragraphs = array_filter( preg_split( '/\R{2,}/u', $text ) ?: array() );
 		$html       = implode( "\n", array_map( static fn( $p ) => '<p>' . esc_html( trim( $p ) ) . '</p>', $paragraphs ) );
-		return new TextGenerationResult( wp_trim_words( $text, 10, '…' ), wp_trim_words( $text, 32, '…' ), wp_kses_post( $html ) );
+		return new TextGenerationResult( $this->titles->from_text( $text ), wp_trim_words( $text, 32, '…' ), wp_kses_post( $html ) );
 	}
 
 	/** @param array<int, string> $names

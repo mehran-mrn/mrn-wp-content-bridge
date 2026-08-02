@@ -7,6 +7,7 @@
 
 namespace MRN\ContentBridge\Admin;
 
+use MRN\ContentBridge\Core\I18n;
 use MRN\ContentBridge\Infrastructure\EntityRepository;
 
 defined( 'ABSPATH' ) || exit;
@@ -27,8 +28,9 @@ final class SocialMetaBox {
 		wp_nonce_field( 'mrncb_social_meta', 'mrncb_social_nonce' );
 		$selected     = array_map( 'absint', (array) get_post_meta( $post->ID, '_mrncb_social_destinations', true ) );
 		$destinations = $this->entities->destinations( true );
+		ob_start();
 		?>
-		<div class="mrncb-metabox" dir="rtl">
+		<div class="mrncb-metabox" dir="<?php echo esc_attr( I18n::direction() ); ?>" lang="<?php echo esc_attr( I18n::language() ); ?>">
 			<p class="description">انتشار فقط هنگام ورود نخست مطلب به وضعیت Publish انجام می‌شود. هر مقصد نتیجه و Retry مستقل دارد.</p>
 			<div class="mrncb-meta-destinations">
 				<?php foreach ( $destinations as $destination ) : ?>
@@ -57,6 +59,7 @@ final class SocialMetaBox {
 			<label><input type="checkbox" name="mrncb_social_resend" value="1"> در Update بعدی مجدداً ارسال شود</label>
 		</div>
 		<?php
+		echo I18n::localize_markup( (string) ob_get_clean() ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
 	}
 
 	public function save( int $post_id, \WP_Post $post ): void {

@@ -43,13 +43,21 @@ final class EntityRepository {
 	/** @param array<string, mixed> $data */
 	public function save_source( array $data ): int {
 		global $wpdb;
-		$table = $wpdb->prefix . 'mrncb_sources';
-		$id    = absint( $data['id'] ?? 0 );
-		$now   = current_time( 'mysql', true );
+		$table    = $wpdb->prefix . 'mrncb_sources';
+		$id       = absint( $data['id'] ?? 0 );
+		$now      = current_time( 'mysql', true );
+		$platform = sanitize_key( $data['platform'] ?? '' );
+		$feed_url = esc_url_raw( (string) ( $data['feed_url'] ?? '' ) );
+		if ( ! in_array( $platform, array( 'telegram', 'bale', 'rss' ), true ) ) {
+			throw new \InvalidArgumentException( 'نوع منبع انتخاب‌شده پشتیبانی نمی‌شود.' );
+		}
+		if ( 'rss' === $platform && ! wp_http_validate_url( $feed_url ) ) {
+			throw new \InvalidArgumentException( 'یک URL معتبر و عمومی برای فید RSS وارد کنید.' );
+		}
 
 		$record = array(
 			'name'       => sanitize_text_field( $data['name'] ?? '' ),
-			'platform'   => sanitize_key( $data['platform'] ?? '' ),
+			'platform'   => $platform,
 			'chat_id'    => sanitize_text_field( $data['chat_id'] ?? '' ),
 			'config'     => wp_json_encode(
 				array(
@@ -58,6 +66,8 @@ final class EntityRepository {
 					'prompt'             => sanitize_textarea_field( $data['prompt'] ?? '' ),
 					'translate'          => ! empty( $data['translate'] ),
 					'generate_images'    => ! empty( $data['generate_images'] ),
+					'confirm_inbound'    => ! array_key_exists( 'confirm_inbound', $data ) || ! empty( $data['confirm_inbound'] ),
+					'feed_url'           => $feed_url,
 					'category_id'        => absint( $data['category_id'] ?? 0 ),
 					'author_id'          => absint( $data['author_id'] ?? get_current_user_id() ),
 					'schedule_delay'     => absint( $data['schedule_delay'] ?? 0 ),
@@ -65,12 +75,20 @@ final class EntityRepository {
 				),
 				JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
 			),
-			'status'     => in_array( $data['status'] ?? 'active', array( 'active', 'paused' ), true ) ? $data['status'] : 'active',
+			'status'     => in_array( $data['status'] ?? 'active', array( 'active', 'paused' ), true ) ? ( $data['status'] ?? 'active' ) : 'active',
 			'updated_at' => $now,
 		);
+		if ( 'rss' === $platform ) {
+			$config                    = json_decode( (string) $record['config'], true ) ?: array();
+			$config['confirm_inbound'] = false;
+			$record['config']          = wp_json_encode( $config, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES );
+		}
 
 		$existing = $id ? $this->source( $id ) : null;
 		$token    = trim( (string) ( $data['token'] ?? '' ) );
+		if ( in_array( $platform, array( 'telegram', 'bale' ), true ) && '' === $token && ! $existing ) {
+			throw new \InvalidArgumentException( 'Bot Token برای منبع تلگرام یا بله الزامی است.' );
+		}
 		if ( '' !== $token && ! str_contains( $token, '•' ) ) {
 			$record['credentials'] = wp_json_encode( array( 'token' => $this->vault->encrypt( sanitize_text_field( $token ) ) ) );
 		} elseif ( $existing ) {
@@ -78,12 +96,18 @@ final class EntityRepository {
 		}
 
 		if ( $id ) {
-			$wpdb->update( $table, $record, array( 'id' => $id ) );
+			$updated = $wpdb->update( $table, $record, array( 'id' => $id ) );
+			if ( false === $updated ) {
+				$this->throw_database_error( 'source', 'update' );
+			}
 			return $id;
 		}
 
 		$record['created_at'] = $now;
-		$wpdb->insert( $table, $record );
+		$inserted             = $wpdb->insert( $table, $record );
+		if ( false === $inserted || (int) $wpdb->insert_id < 1 ) {
+			$this->throw_database_error( 'source', 'insert' );
+		}
 		return (int) $wpdb->insert_id;
 	}
 
@@ -106,7 +130,7 @@ final class EntityRepository {
 				),
 				JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
 			),
-			'status'      => in_array( $data['status'] ?? 'active', array( 'active', 'paused' ), true ) ? $data['status'] : 'active',
+			'status'      => in_array( $data['status'] ?? 'active', array( 'active', 'paused' ), true ) ? ( $data['status'] ?? 'active' ) : 'active',
 			'updated_at'  => $now,
 		);
 
@@ -119,12 +143,18 @@ final class EntityRepository {
 		}
 
 		if ( $id ) {
-			$wpdb->update( $table, $record, array( 'id' => $id ) );
+			$updated = $wpdb->update( $table, $record, array( 'id' => $id ) );
+			if ( false === $updated ) {
+				$this->throw_database_error( 'destination', 'update' );
+			}
 			return $id;
 		}
 
 		$record['created_at'] = $now;
-		$wpdb->insert( $table, $record );
+		$inserted             = $wpdb->insert( $table, $record );
+		if ( false === $inserted || (int) $wpdb->insert_id < 1 ) {
+			$this->throw_database_error( 'destination', 'insert' );
+		}
 		return (int) $wpdb->insert_id;
 	}
 
@@ -153,6 +183,22 @@ final class EntityRepository {
 				'updated_at'     => current_time( 'mysql', true ),
 			),
 			array( 'id' => $id )
+		);
+	}
+
+	private function throw_database_error( string $entity, string $operation ): never {
+		global $wpdb;
+		$details = trim( (string) $wpdb->last_error );
+		if ( '' === $details ) {
+			$details = 'The database did not return a record ID.';
+		}
+		throw new \RuntimeException(
+			sprintf(
+				'Could not %1$s the Content Bridge %2$s: %3$s',
+				$operation,
+				$entity,
+				$details
+			)
 		);
 	}
 }

@@ -20,6 +20,7 @@ use MRN\ContentBridge\Infrastructure\SecretVault;
 use MRN\ContentBridge\Platform\BaleAdapter;
 use MRN\ContentBridge\Platform\LinkedInAdapter;
 use MRN\ContentBridge\Platform\PlatformRegistry;
+use MRN\ContentBridge\Platform\RssAdapter;
 use MRN\ContentBridge\Platform\TelegramAdapter;
 use MRN\ContentBridge\Queue\JobQueue;
 use MRN\ContentBridge\Queue\JobRouter;
@@ -30,6 +31,7 @@ use MRN\ContentBridge\Workflow\MediaImporter;
 use MRN\ContentBridge\Workflow\MessagePoller;
 use MRN\ContentBridge\Workflow\NotificationService;
 use MRN\ContentBridge\Workflow\SocialPublisher;
+use MRN\ContentBridge\Workflow\TitleExtractor;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -60,19 +62,22 @@ final class Plugin {
 		$platforms = new PlatformRegistry();
 		$telegram  = new TelegramAdapter( $entities, $settings );
 		$bale      = new BaleAdapter( $entities, $settings );
+		$rss       = new RssAdapter( $entities );
 		$linkedin  = new LinkedInAdapter( $settings );
 		$platforms->register( $telegram );
 		$platforms->register( $bale );
+		$platforms->register( $rss );
 		$platforms->register( $linkedin );
 
 		$providers = new ProviderRegistry();
 		$providers->register_text( new OpenAITextProvider( $settings ) );
 		$providers->register_image( new OpenAIImageProvider( $settings ) );
 
+		$approvals     = new ApprovalService( $entities, $platforms, $queue, $logger );
 		$poller        = new MessagePoller( $entities, $platforms, $queue, $settings, $logger );
 		$media         = new MediaImporter( $platforms, $settings );
-		$articles      = new ArticleWorkflow( $entities, $providers, $media, $queue, $settings );
-		$approvals     = new ApprovalService( $entities, $platforms, $queue, $logger );
+		$titles        = new TitleExtractor();
+		$articles      = new ArticleWorkflow( $entities, $providers, $media, $queue, $settings, $approvals, $titles );
 		$social        = new SocialPublisher( $entities, $platforms, $providers, $queue, $settings );
 		$notifications = new NotificationService( $entities, $platforms );
 		$router        = new JobRouter( $poller, $articles, $approvals, $social, $notifications );
@@ -83,7 +88,7 @@ final class Plugin {
 			static function ( array $schedules ): array {
 				$schedules['mrncb_every_minute'] = array(
 					'interval' => 60,
-					'display'  => __( 'هر دقیقه — Content Bridge', 'mrn-content-bridge' ),
+					'display'  => I18n::translate( 'هر دقیقه — Content Bridge' ),
 				);
 				return $schedules;
 			}
@@ -106,8 +111,6 @@ final class Plugin {
 		);
 		add_action( 'transition_post_status', array( $social, 'on_transition' ), 10, 3 );
 		add_action( 'mrncb_social_settings_saved', array( $social, 'enqueue_for_post' ) );
-		add_action( 'mrncb_approval_callback', array( $approvals, 'handle_callback_message' ) );
-
 		if ( is_admin() ) {
 			( new Admin( $settings, $entities, $platforms, $providers, $queue, $worker, $poller, $linkedin, $vault ) )->register();
 			( new SocialMetaBox( $entities ) )->register();

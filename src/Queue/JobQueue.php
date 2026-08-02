@@ -14,7 +14,7 @@ final class JobQueue {
 	public function dispatch( string $type, array $payload = array(), int $delay = 0, int $max_attempts = 3 ): int {
 		global $wpdb;
 		$now = time();
-		$wpdb->insert(
+		$inserted = $wpdb->insert(
 			$wpdb->prefix . 'mrncb_jobs',
 			array(
 				'type'         => sanitize_key( $type ),
@@ -27,6 +27,10 @@ final class JobQueue {
 				'updated_at'   => gmdate( 'Y-m-d H:i:s', $now ),
 			)
 		);
+		if ( false === $inserted || (int) $wpdb->insert_id < 1 ) {
+			$details = trim( (string) $wpdb->last_error );
+			throw new \RuntimeException( '' !== $details ? 'Could not enqueue Content Bridge job: ' . $details : 'Could not enqueue Content Bridge job.' );
+		}
 		return (int) $wpdb->insert_id;
 	}
 
@@ -103,6 +107,23 @@ final class JobQueue {
 				SET status = 'pending', attempts = 0, available_at = %s, last_error = NULL
 				WHERE status = 'failed'",
 				current_time( 'mysql', true )
+			)
+		);
+	}
+
+	public function cancel_for_workflow( int $workflow_id ): int {
+		global $wpdb;
+		if ( $workflow_id < 1 ) {
+			return 0;
+		}
+		return (int) $wpdb->query(
+			$wpdb->prepare(
+				"UPDATE {$wpdb->prefix}mrncb_jobs
+				SET status = 'cancelled', locked_at = NULL, locked_by = NULL, updated_at = %s
+				WHERE status IN ('pending','processing','retry_scheduled')
+				AND payload LIKE %s",
+				current_time( 'mysql', true ),
+				'%\"workflow_id\":' . $workflow_id . '%'
 			)
 		);
 	}

@@ -8,6 +8,7 @@
 namespace MRN\ContentBridge\Admin;
 
 use MRN\ContentBridge\AI\ProviderRegistry;
+use MRN\ContentBridge\Core\I18n;
 use MRN\ContentBridge\Core\Settings;
 use MRN\ContentBridge\Infrastructure\EntityRepository;
 use MRN\ContentBridge\Infrastructure\SecretVault;
@@ -50,6 +51,7 @@ final class Admin {
 
 	public function register(): void {
 		add_action( 'admin_menu', array( $this, 'menus' ) );
+		add_action( 'admin_head', array( $this, 'menu_icon_styles' ) );
 		add_action( 'admin_enqueue_scripts', array( $this, 'assets' ) );
 		add_action( 'admin_init', array( $this, 'linkedin_callback' ) );
 		foreach ( array( 'settings', 'source', 'destination', 'approver', 'tool' ) as $action ) {
@@ -59,12 +61,32 @@ final class Admin {
 	}
 
 	public function menus(): void {
-		add_menu_page( 'Content Bridge', 'Content Bridge', self::CAPABILITY, 'mrncb-dashboard', array( $this, 'render' ), 'dashicons-randomize', 26 );
+		add_menu_page( 'Content Bridge', 'Content Bridge', self::CAPABILITY, 'mrncb-dashboard', array( $this, 'render' ), MRNCB_URL . 'assets/images/icon-128x128.png', 26 );
 		foreach ( $this->pages as $slug => $label ) {
+			$label = I18n::translate( $label );
 			add_submenu_page( 'mrncb-dashboard', $label . ' — Content Bridge', $label, self::CAPABILITY, $slug, array( $this, 'render' ) );
 		}
 		remove_submenu_page( 'mrncb-dashboard', 'mrncb-dashboard' );
-		add_submenu_page( 'mrncb-dashboard', 'داشبورد — Content Bridge', 'داشبورد', self::CAPABILITY, 'mrncb-dashboard', array( $this, 'render' ), 0 );
+		$dashboard = I18n::translate( 'داشبورد' );
+		add_submenu_page( 'mrncb-dashboard', $dashboard . ' — Content Bridge', $dashboard, self::CAPABILITY, 'mrncb-dashboard', array( $this, 'render' ), 0 );
+	}
+
+	/**
+	 * Keep the high-resolution brand mark within WordPress menu icon bounds.
+	 */
+	public function menu_icon_styles(): void {
+		?>
+		<style id="mrncb-menu-icon-styles">
+			#adminmenu #toplevel_page_mrncb-dashboard .wp-menu-image img {
+				box-sizing: content-box;
+				width: 20px;
+				height: 20px;
+				max-width: 20px;
+				max-height: 20px;
+				object-fit: contain;
+			}
+		</style>
+		<?php
 	}
 
 	public function assets( string $hook ): void {
@@ -73,13 +95,19 @@ final class Admin {
 		}
 		wp_enqueue_style( 'mrncb-admin', MRNCB_URL . 'assets/css/admin.css', array(), MRNCB_VERSION );
 		wp_enqueue_script( 'mrncb-admin', MRNCB_URL . 'assets/js/admin.js', array(), MRNCB_VERSION, true );
+		wp_localize_script(
+			'mrncb-admin',
+			'mrncbAdminI18n',
+			array( 'running' => I18n::translate( 'در حال اجرا…' ) )
+		);
 	}
 
 	public function render(): void {
 		$this->guard();
 		$page = sanitize_key( wp_unslash( $_GET['page'] ?? 'mrncb-dashboard' ) ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		ob_start();
 		?>
-		<div class="wrap mrncb-wrap" dir="rtl">
+		<div class="wrap mrncb-wrap" dir="<?php echo esc_attr( I18n::direction() ); ?>" lang="<?php echo esc_attr( I18n::language() ); ?>">
 			<?php $this->header( $page ); ?>
 			<?php $this->notice(); ?>
 			<main class="mrncb-main">
@@ -119,6 +147,7 @@ final class Admin {
 			</main>
 		</div>
 		<?php
+		echo I18n::localize_markup( (string) ob_get_clean() ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
 	}
 
 	public function handle_settings(): void {
@@ -129,13 +158,21 @@ final class Admin {
 
 	public function handle_source(): void {
 		$this->guard_post( 'mrncb_source' );
-		$this->entities->save_source( $_POST );
+		try {
+			$this->entities->save_source( $_POST );
+		} catch ( \Throwable $error ) {
+			$this->redirect( 'mrncb-sources', 'ذخیره منبع انجام نشد: ' . $error->getMessage(), 'error' );
+		}
 		$this->redirect( 'mrncb-sources', 'منبع ذخیره شد.' );
 	}
 
 	public function handle_destination(): void {
 		$this->guard_post( 'mrncb_destination' );
-		$this->entities->save_destination( $_POST );
+		try {
+			$this->entities->save_destination( $_POST );
+		} catch ( \Throwable $error ) {
+			$this->redirect( 'mrncb-destinations', 'ذخیره مقصد انجام نشد: ' . $error->getMessage(), 'error' );
+		}
 		$this->redirect( 'mrncb-destinations', 'مقصد ذخیره شد.' );
 	}
 
@@ -162,11 +199,14 @@ final class Admin {
 		$tool    = sanitize_key( wp_unslash( $_POST['tool'] ?? '' ) );
 		$message = '';
 		try {
-			switch ( $tool ) {
-			case 'run_worker':
-				$result  = $this->worker->run( absint( $_POST['batch_size'] ?? 0 ) ?: null );
-				$message = $result['locked'] ? 'Worker دیگری در حال اجرا است.' : sprintf( '%d Job اجرا و %d Job ناموفق شد.', $result['processed'], $result['failed'] );
-				break;
+				switch ( $tool ) {
+				case 'run_worker':
+					$received = $this->poller->poll();
+					$result   = $this->worker->run( absint( $_POST['batch_size'] ?? 0 ) ?: null );
+					$message  = $result['locked']
+						? sprintf( '%d پیام جدید دریافت شد؛ Worker دیگری در حال اجرا است.', $received )
+						: sprintf( '%d پیام جدید دریافت، %d Job اجرا و %d Job ناموفق شد.', $received, $result['processed'], $result['failed'] );
+					break;
 			case 'poll':
 				$message = sprintf( '%d پیام جدید دریافت شد.', $this->poller->poll() );
 				break;
@@ -226,9 +266,11 @@ final class Admin {
 
 	private function header( string $page ): void {
 		?>
-		<header class="mrncb-hero">
-			<div class="mrncb-brand">
-				<span class="mrncb-logo"><span></span><span></span><span></span></span>
+			<header class="mrncb-hero">
+				<div class="mrncb-brand">
+					<span class="mrncb-logo" aria-hidden="true">
+						<img src="<?php echo esc_url( MRNCB_URL . 'assets/images/content-bridge-icon.png' ); ?>" alt="" width="52" height="52">
+					</span>
 				<div>
 					<h1>MRN Content Bridge</h1>
 					<p>هاب هوشمند و قابل توسعه انتشار محتوا</p>
@@ -269,7 +311,7 @@ final class Admin {
 			<section class="mrncb-card">
 				<div class="mrncb-card-title"><h3>وضعیت اتصال‌ها</h3><span class="mrncb-badge success">Long Polling</span></div>
 				<?php foreach ( $this->entities->sources() as $source ) : ?>
-					<div class="mrncb-row"><div><strong><?php echo esc_html( $source->name ); ?></strong><small><?php echo esc_html( ucfirst( $source->platform ) ); ?> · <?php echo esc_html( $source->chat_id ?: 'همه چت‌ها' ); ?></small></div><span class="mrncb-badge <?php echo $source->last_error ? 'danger' : 'success'; ?>"><?php echo $source->last_error ? 'خطا' : 'آماده'; ?></span></div>
+					<div class="mrncb-row"><div><strong><?php echo esc_html( $source->name ); ?></strong><small><?php echo esc_html( ucfirst( $source->platform ) ); ?> · <?php echo esc_html( $source->chat_id ?: I18n::translate( 'همه چت‌ها' ) ); ?></small></div><span class="mrncb-badge <?php echo $source->last_error ? 'danger' : 'success'; ?>"><?php echo $source->last_error ? 'خطا' : 'آماده'; ?></span></div>
 				<?php endforeach; ?>
 				<?php
 				if ( ! $this->entities->sources() ) :
@@ -290,7 +332,7 @@ final class Admin {
 
 	private function sources(): void {
 		?>
-		<section class="mrncb-section-head"><div><h2>منابع ورودی</h2><p>تلگرام و بله با getUpdates و Long Polling؛ تعداد منابع نامحدود</p></div></section>
+		<section class="mrncb-section-head"><div><h2>منابع ورودی</h2><p>تلگرام و بله با getUpdates و Long Polling؛ RSS/Atom با واکشی امن و تکرارناپذیر</p></div></section>
 		<div class="mrncb-grid sidebar">
 			<section class="mrncb-card">
 				<h3>منابع ثبت‌شده</h3>
@@ -298,7 +340,7 @@ final class Admin {
 				foreach ( $this->entities->sources() as $source ) :
 					$config = $this->entities->config( $source );
 					?>
-					<div class="mrncb-row"><div><strong><?php echo esc_html( $source->name ); ?></strong><small><?php echo esc_html( $source->platform ); ?> · <?php echo esc_html( $source->chat_id ?: 'همه چت‌ها' ); ?> · <?php echo esc_html( $config['mode'] ?? 'direct' ); ?></small></div><span class="mrncb-badge <?php echo 'active' === $source->status ? 'success' : ''; ?>"><?php echo esc_html( $source->status ); ?></span></div>
+						<div class="mrncb-row"><div><strong><?php echo esc_html( $source->name ); ?></strong><small><?php echo esc_html( $source->platform ); ?> · <?php echo esc_html( 'rss' === $source->platform ? ( $config['feed_url'] ?? '—' ) : ( $source->chat_id ?: I18n::translate( 'همه چت‌ها' ) ) ); ?> · <?php echo esc_html( $config['mode'] ?? 'direct' ); ?></small></div><span class="mrncb-badge <?php echo 'active' === $source->status ? 'success' : ''; ?>"><?php echo esc_html( $source->status ); ?></span></div>
 				<?php endforeach; ?>
 				<?php
 				if ( ! $this->entities->sources() ) :
@@ -307,16 +349,18 @@ final class Admin {
 			</section>
 			<section class="mrncb-card sticky">
 				<h3>افزودن منبع</h3>
-				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="mrncb-form">
+					<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="mrncb-form" data-mrncb-source-form>
 					<input type="hidden" name="action" value="mrncb_save_source"><?php wp_nonce_field( 'mrncb_source' ); ?>
 					<label>نام نمایشی<input required name="name" placeholder="کانال اخبار مثنوی"></label>
-					<label>پلتفرم<select name="platform"><option value="telegram">Telegram</option><option value="bale">Bale</option></select></label>
-					<label>Bot Token<input required type="password" name="token" autocomplete="new-password"></label>
-					<label>Chat / Channel ID<input name="chat_id" placeholder="-100123456789"></label>
+						<label>نوع منبع<select name="platform" data-mrncb-source-platform><option value="telegram">Telegram</option><option value="bale">Bale</option><option value="rss">RSS / Atom</option></select></label>
+						<label data-mrncb-bot-field>Bot Token<input type="password" name="token" autocomplete="new-password"></label>
+						<label data-mrncb-bot-field>Chat / Channel ID<input name="chat_id" placeholder="-100123456789"></label>
+						<label data-mrncb-rss-field hidden>URL فید RSS/Atom<input type="url" name="feed_url" placeholder="https://example.com/feed/"></label>
 					<div class="mrncb-fields"><label>پردازش<select name="mode"><option value="direct">مستقیم</option><option value="ai">هوش مصنوعی</option></select></label><label>وضعیت نهایی<select name="post_status"><option value="draft">Draft</option><option value="pending">Pending Review</option><option value="publish">Publish Immediately</option><option value="schedule">Schedule</option></select></label></div>
 					<div class="mrncb-fields"><label>تأخیر Schedule (ثانیه)<input type="number" name="schedule_delay" value="3600" min="60"></label><label>رفتار خطای تصویر<select name="image_failure_mode"><option value="publish_without">انتشار بدون تصویر</option><option value="pending">نگه‌داشتن در Pending</option><option value="retry">Retry Workflow</option><option value="fail">Fail کامل</option></select></label></div>
 					<label>پرامپت اختصاصی<textarea name="prompt" rows="4" placeholder="لحن، ساختار و محدودیت‌های این منبع"></textarea></label>
-					<div class="mrncb-checks"><label><input type="checkbox" name="translate" value="1"> ترجمه به زبان سایت</label><label><input type="checkbox" name="generate_images" value="1"> تولید تصویر با AI</label></div>
+					<input type="hidden" name="confirm_inbound" value="0">
+						<div class="mrncb-checks"><label data-mrncb-confirm-field><input type="checkbox" name="confirm_inbound" value="1" checked> دریافت تأیید فرستنده پیش از پردازش</label><label><input type="checkbox" name="translate" value="1"> ترجمه به زبان سایت</label><label><input type="checkbox" name="generate_images" value="1"> تولید تصویر با AI</label></div>
 					<button class="mrncb-button primary">ذخیره منبع</button>
 				</form>
 			</section>
@@ -568,7 +612,7 @@ final class Admin {
 
 	private function guard(): void {
 		if ( ! current_user_can( self::CAPABILITY ) ) {
-			wp_die( esc_html__( 'شما مجوز دسترسی به این بخش را ندارید.', 'mrn-content-bridge' ) );
+			wp_die( esc_html( I18n::translate( 'شما مجوز دسترسی به این بخش را ندارید.' ) ) );
 		}
 	}
 
@@ -578,6 +622,7 @@ final class Admin {
 	}
 
 	private function redirect( string $page, string $message, string $type = 'success' ): never {
+		$message = I18n::translate( $message );
 		wp_safe_redirect(
 			add_query_arg(
 				array(

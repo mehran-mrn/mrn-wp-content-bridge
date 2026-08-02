@@ -10,7 +10,7 @@ namespace MRN\ContentBridge\Infrastructure;
 defined( 'ABSPATH' ) || exit;
 
 final class Installer {
-	public const DB_VERSION = '1.0.0';
+	public const DB_VERSION = '1.0.2';
 
 	public static function activate(): void {
 		self::install_schema();
