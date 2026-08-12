@@ -10,7 +10,7 @@ namespace MRN\ContentBridge\Infrastructure;
 defined( 'ABSPATH' ) || exit;
 
 final class Installer {
-	public const DB_VERSION = '1.0.2';
+	public const DB_VERSION = '1.0.3';
 
 	public static function activate(): void {
 		self::install_schema();
@@ -155,6 +155,21 @@ final class Installer {
 				created_at datetime NOT NULL,
 				PRIMARY KEY  (id),
 				UNIQUE KEY platform_user (platform,user_id)
+			) {$charset};",
+			"CREATE TABLE {$p}magic_logins (
+				id bigint unsigned NOT NULL AUTO_INCREMENT,
+				token_hash char(64) NOT NULL,
+				source_id bigint unsigned NOT NULL,
+				user_id bigint unsigned NOT NULL,
+				requested_platform varchar(32) NOT NULL,
+				requested_user_id varchar(191) NOT NULL,
+				expires_at datetime NOT NULL,
+				consumed_at datetime NULL,
+				created_at datetime NOT NULL,
+				PRIMARY KEY  (id),
+				UNIQUE KEY token_hash (token_hash),
+				KEY expires_at (expires_at),
+				KEY source_user (source_id,user_id)
 			) {$charset};",
 			"CREATE TABLE {$p}audit_logs (
 				id bigint unsigned NOT NULL AUTO_INCREMENT,

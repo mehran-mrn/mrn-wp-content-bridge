@@ -57,6 +57,7 @@ final class Admin {
 		foreach ( array( 'settings', 'source', 'destination', 'approver', 'tool' ) as $action ) {
 			add_action( 'admin_post_mrncb_save_' . $action, array( $this, 'handle_' . $action ) );
 		}
+		add_action( 'admin_post_mrncb_delete_source', array( $this, 'handle_delete_source' ) );
 		add_action( 'admin_post_mrncb_linkedin_connect', array( $this, 'linkedin_connect' ) );
 	}
 
@@ -98,7 +99,12 @@ final class Admin {
 		wp_localize_script(
 			'mrncb-admin',
 			'mrncbAdminI18n',
-			array( 'running' => I18n::translate( 'در حال اجرا…' ) )
+			array(
+				'running'      => I18n::translate( 'در حال اجرا…' ),
+				'deleteSource' => I18n::translate( 'این منبع حذف شود؟ این عملیات قابل بازگشت نیست.' ),
+				'flushQueue'   => I18n::translate( 'تمام Jobهای ذخیره‌شده حذف و Workflowهای در حال پردازش لغو شوند؟ Jobای که همین لحظه در حال اجراست قابل قطع فوری نیست.' ),
+				'stopProcessing' => I18n::translate( 'پردازش اضطراری متوقف، منابع Pause و صف تخلیه شود؟ فرآیند قدیمی سیستم‌عامل باید جداگانه متوقف شود.' ),
+			)
 		);
 	}
 
@@ -159,11 +165,25 @@ final class Admin {
 	public function handle_source(): void {
 		$this->guard_post( 'mrncb_source' );
 		try {
-			$this->entities->save_source( $_POST );
+			$this->entities->save_source( wp_unslash( $_POST ) );
 		} catch ( \Throwable $error ) {
 			$this->redirect( 'mrncb-sources', 'ذخیره منبع انجام نشد: ' . $error->getMessage(), 'error' );
 		}
 		$this->redirect( 'mrncb-sources', 'منبع ذخیره شد.' );
+	}
+
+	/**
+	 * Delete a source after verifying its source-specific nonce.
+	 */
+	public function handle_delete_source(): void {
+		$source_id = absint( wp_unslash( $_POST['source_id'] ?? 0 ) ); // phpcs:ignore WordPress.Security.NonceVerification.Missing
+		$this->guard_post( 'mrncb_delete_source_' . $source_id );
+		try {
+			$this->entities->delete_source( $source_id );
+		} catch ( \Throwable $error ) {
+			$this->redirect( 'mrncb-sources', 'حذف منبع انجام نشد: ' . $error->getMessage(), 'error' );
+		}
+		$this->redirect( 'mrncb-sources', 'منبع حذف شد.' );
 	}
 
 	public function handle_destination(): void {
@@ -199,42 +219,63 @@ final class Admin {
 		$tool    = sanitize_key( wp_unslash( $_POST['tool'] ?? '' ) );
 		$message = '';
 		try {
-				switch ( $tool ) {
+			switch ( $tool ) {
 				case 'run_worker':
-					$received = $this->poller->poll();
+					$received = $this->poller->poll( null, true );
 					$result   = $this->worker->run( absint( $_POST['batch_size'] ?? 0 ) ?: null );
 					$message  = $result['locked']
 						? sprintf( '%d پیام جدید دریافت شد؛ Worker دیگری در حال اجرا است.', $received )
 						: sprintf( '%d پیام جدید دریافت، %d Job اجرا و %d Job ناموفق شد.', $received, $result['processed'], $result['failed'] );
 					break;
-			case 'poll':
-				$message = sprintf( '%d پیام جدید دریافت شد.', $this->poller->poll() );
-				break;
-			case 'retry':
-				$message = sprintf( '%d Job برای تلاش مجدد آماده شد.', $this->queue->retry_failed() );
-				break;
-			case 'unlock':
-				$this->worker->clear_lock();
-				$message = 'قفل Worker پاک شد.';
-				break;
-			case 'test_openai':
-				$result  = $this->providers->text()->test_connection();
-				$message = $result['message'];
-				break;
-			case 'test_platform':
-				$entity = $this->entities->source( absint( $_POST['source_id'] ?? 0 ) );
-				if ( ! $entity ) {
-					throw new \RuntimeException( 'یک منبع را انتخاب کنید.' );
-				}
-				$result  = $this->platforms->get( (string) $entity->platform )->test_connection( $entity );
-				$message = $result['message'];
-				break;
-			case 'test_linkedin':
-				$result  = $this->linkedin->test_connection( (object) array() );
-				$message = $result['message'];
-				break;
-			default:
-				$message = 'ابزار ناشناخته است.';
+				case 'poll':
+					$message = sprintf( '%d پیام جدید دریافت شد.', $this->poller->poll( null, true ) );
+					break;
+				case 'retry':
+					$message = sprintf( '%d Job برای تلاش مجدد آماده شد.', $this->queue->retry_failed() );
+					break;
+				case 'unlock':
+					$this->worker->clear_lock();
+					$this->poller->clear_lock();
+					$message = 'قفل Worker و Poller پاک شد.';
+					break;
+				case 'flush_queue':
+					$result = $this->queue->flush();
+					$message = sprintf( '%d Job حذف و %d Workflow در حال پردازش لغو شد. Job جاری، در صورت وجود، تا پایان درخواست متوقف نمی‌شود.', $result['jobs'], $result['workflows'] );
+					break;
+				case 'recover_rss':
+					$result  = $this->queue->recover_incomplete_rss();
+					$message = sprintf( '%d Workflow و %d پیام ناقص RSS بازنشانی و %d پیش‌نویس قبلی به زباله‌دان منتقل شد. اکنون Poll و Worker را اجرا کنید.', $result['workflows'], $result['messages'], $result['posts'] );
+					break;
+				case 'emergency_stop':
+					$this->settings->set_processing_enabled( false );
+					$paused = $this->entities->pause_all_sources();
+					$result = $this->queue->flush();
+					$this->worker->clear_lock();
+					$this->poller->clear_lock();
+					$message = sprintf( 'پردازش متوقف شد؛ %d منبع Pause، %d Job حذف و %d Workflow لغو شد.', $paused, $result['jobs'], $result['workflows'] );
+					break;
+				case 'resume_processing':
+					$this->settings->set_processing_enabled( true );
+					$message = 'موتور پردازش فعال شد. منابع موردنیاز را جداگانه روی «فعال» قرار دهید.';
+					break;
+				case 'test_openai':
+					$result  = $this->providers->text()->test_connection();
+					$message = $result['message'];
+					break;
+				case 'test_platform':
+					$entity = $this->entities->source( absint( $_POST['source_id'] ?? 0 ) );
+					if ( ! $entity ) {
+						throw new \RuntimeException( 'یک منبع را انتخاب کنید.' );
+					}
+					$result  = $this->platforms->get( (string) $entity->platform )->test_connection( $entity );
+					$message = $result['message'];
+					break;
+				case 'test_linkedin':
+					$result  = $this->linkedin->test_connection( (object) array() );
+					$message = $result['message'];
+					break;
+				default:
+					$message = 'ابزار ناشناخته است.';
 			}
 		} catch ( \Throwable $error ) {
 			$this->redirect( 'mrncb-tools', $error->getMessage(), 'error' );
@@ -295,7 +336,9 @@ final class Admin {
 		$stats = array(
 			array( 'پیام‌های دریافتی', (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$p}messages" ), 'inbox' ),
 			array( 'مطالب ساخته‌شده', (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$p}workflows WHERE post_id IS NOT NULL" ), 'edit-page' ),
+			array( 'در انتظار دسته‌بندی', (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$p}workflows WHERE status = 'awaiting_category'" ), 'category' ),
 			array( 'در انتظار تأیید', (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$p}workflows WHERE status = 'pending_review'" ), 'visibility' ),
+			array( 'در انتظار توضیح اصلاح', (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$p}workflows WHERE status = 'awaiting_revision_prompt'" ), 'edit' ),
 			array( 'منتشرشده', (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$p}workflows WHERE status = 'published'" ), 'yes-alt' ),
 			array( 'Job ناموفق', (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$p}jobs WHERE status = 'failed'" ), 'warning' ),
 			array( 'انتشار اجتماعی', (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$p}social_posts WHERE status = 'published'" ), 'share' ),
@@ -331,37 +374,140 @@ final class Admin {
 	}
 
 	private function sources(): void {
+		$sources        = $this->entities->sources();
+		$editing_id     = absint( wp_unslash( $_GET['edit_source'] ?? 0 ) ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		$editing        = $editing_id ? $this->entities->source( $editing_id ) : null;
+		$editing_config = $editing ? $this->entities->config( $editing ) : array();
+		$credentials    = $editing ? json_decode( (string) $editing->credentials, true ) : array();
+		$has_token      = ! empty( $credentials['token'] );
+		$has_instagram_token = ! empty( $credentials['access_token'] );
+		$categories     = get_categories( array( 'hide_empty' => false ) );
+		$categories     = is_wp_error( $categories ) ? array() : $categories;
+		$authors        = get_users( array( 'orderby' => 'display_name', 'order' => 'ASC' ) );
+		$bot_sources    = array_filter(
+			$sources,
+			static fn( object $source ): bool => in_array( (string) $source->platform, array( 'telegram', 'bale' ), true )
+		);
 		?>
-		<section class="mrncb-section-head"><div><h2>منابع ورودی</h2><p>تلگرام و بله با getUpdates و Long Polling؛ RSS/Atom با واکشی امن و تکرارناپذیر</p></div></section>
+		<section class="mrncb-section-head"><div><h2>منابع ورودی</h2><p>تلگرام و بله با Long Polling؛ RSS/Atom و Instagram با واکشی امن و تکرارناپذیر</p></div></section>
 		<div class="mrncb-grid sidebar">
 			<section class="mrncb-card">
 				<h3>منابع ثبت‌شده</h3>
 				<?php
-				foreach ( $this->entities->sources() as $source ) :
+				foreach ( $sources as $source ) :
 					$config = $this->entities->config( $source );
 					?>
-						<div class="mrncb-row"><div><strong><?php echo esc_html( $source->name ); ?></strong><small><?php echo esc_html( $source->platform ); ?> · <?php echo esc_html( 'rss' === $source->platform ? ( $config['feed_url'] ?? '—' ) : ( $source->chat_id ?: I18n::translate( 'همه چت‌ها' ) ) ); ?> · <?php echo esc_html( $config['mode'] ?? 'direct' ); ?></small></div><span class="mrncb-badge <?php echo 'active' === $source->status ? 'success' : ''; ?>"><?php echo esc_html( $source->status ); ?></span></div>
+						<div class="mrncb-row">
+							<div><strong><?php echo esc_html( $source->name ); ?></strong><small><?php echo esc_html( $source->platform ); ?> · <?php echo esc_html( 'rss' === $source->platform ? ( $config['feed_url'] ?? '—' ) : ( 'instagram' === $source->platform ? '@' . ( ( $config['instagram_username'] ?? '' ) ?: ( $config['instagram_user_id'] ?? 'me' ) ) : ( $source->chat_id ?: I18n::translate( 'همه چت‌ها' ) ) ) ); ?> · <?php echo esc_html( $config['mode'] ?? 'direct' ); ?> · <?php echo esc_html( get_the_author_meta( 'display_name', (int) ( $config['author_id'] ?? 0 ) ) ?: '—' ); ?></small><?php if ( $source->last_error ) : ?><small class="mrncb-error-text"><?php echo esc_html( $source->last_error ); ?></small><?php endif; ?></div>
+							<div class="mrncb-source-actions">
+								<span class="mrncb-badge <?php echo 'active' === $source->status ? 'success' : ''; ?>"><?php echo esc_html( $source->status ); ?></span>
+								<a class="mrncb-button compact" href="<?php echo esc_url( admin_url( 'admin.php?page=mrncb-sources&edit_source=' . (int) $source->id ) ); ?>">ویرایش</a>
+								<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" data-mrncb-confirm="delete-source">
+									<input type="hidden" name="action" value="mrncb_delete_source">
+									<input type="hidden" name="source_id" value="<?php echo (int) $source->id; ?>">
+									<?php wp_nonce_field( 'mrncb_delete_source_' . (int) $source->id ); ?>
+									<button type="submit" class="mrncb-button compact danger">حذف</button>
+								</form>
+							</div>
+						</div>
 				<?php endforeach; ?>
 				<?php
-				if ( ! $this->entities->sources() ) :
+				if ( ! $sources ) :
 					?>
 					<div class="mrncb-empty">اولین منبع را از فرم روبه‌رو اضافه کنید.</div><?php endif; ?>
 			</section>
 			<section class="mrncb-card sticky">
-				<h3>افزودن منبع</h3>
+				<h3><?php echo $editing ? 'ویرایش منبع' : 'افزودن منبع'; ?></h3>
 					<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="mrncb-form" data-mrncb-source-form>
-					<input type="hidden" name="action" value="mrncb_save_source"><?php wp_nonce_field( 'mrncb_source' ); ?>
-					<label>نام نمایشی<input required name="name" placeholder="کانال اخبار مثنوی"></label>
-						<label>نوع منبع<select name="platform" data-mrncb-source-platform><option value="telegram">Telegram</option><option value="bale">Bale</option><option value="rss">RSS / Atom</option></select></label>
-						<label data-mrncb-bot-field>Bot Token<input type="password" name="token" autocomplete="new-password"></label>
-						<label data-mrncb-bot-field>Chat / Channel ID<input name="chat_id" placeholder="-100123456789"></label>
-						<label data-mrncb-rss-field hidden>URL فید RSS/Atom<input type="url" name="feed_url" placeholder="https://example.com/feed/"></label>
-					<div class="mrncb-fields"><label>پردازش<select name="mode"><option value="direct">مستقیم</option><option value="ai">هوش مصنوعی</option></select></label><label>وضعیت نهایی<select name="post_status"><option value="draft">Draft</option><option value="pending">Pending Review</option><option value="publish">Publish Immediately</option><option value="schedule">Schedule</option></select></label></div>
-					<div class="mrncb-fields"><label>تأخیر Schedule (ثانیه)<input type="number" name="schedule_delay" value="3600" min="60"></label><label>رفتار خطای تصویر<select name="image_failure_mode"><option value="publish_without">انتشار بدون تصویر</option><option value="pending">نگه‌داشتن در Pending</option><option value="retry">Retry Workflow</option><option value="fail">Fail کامل</option></select></label></div>
-					<label>پرامپت اختصاصی<textarea name="prompt" rows="4" placeholder="لحن، ساختار و محدودیت‌های این منبع"></textarea></label>
+					<input type="hidden" name="action" value="mrncb_save_source"><input type="hidden" name="id" value="<?php echo $editing ? (int) $editing->id : 0; ?>"><?php wp_nonce_field( 'mrncb_source' ); ?>
+					<label>نام نمایشی<input required name="name" value="<?php echo esc_attr( $editing->name ?? '' ); ?>" placeholder="کانال اخبار مثنوی"></label>
+						<label>نوع منبع<select name="platform" data-mrncb-source-platform><option value="telegram" <?php selected( $editing->platform ?? 'telegram', 'telegram' ); ?>>Telegram</option><option value="bale" <?php selected( $editing->platform ?? '', 'bale' ); ?>>Bale</option><option value="rss" <?php selected( $editing->platform ?? '', 'rss' ); ?>>RSS / Atom</option><option value="instagram" <?php selected( $editing->platform ?? '', 'instagram' ); ?>>Instagram</option></select></label>
+						<label>نویسنده نوشته‌ها
+							<select name="author_id" required>
+								<?php foreach ( $authors as $author ) : ?>
+									<option value="<?php echo (int) $author->ID; ?>" <?php selected( (int) ( $editing_config['author_id'] ?? get_current_user_id() ), (int) $author->ID ); ?>><?php echo esc_html( $author->display_name . ' (' . $author->user_login . ')' ); ?></option>
+								<?php endforeach; ?>
+							</select>
+							<small>نوشته‌ها به نام این کاربر ساخته می‌شوند و ورود سریع ربات نیز همین حساب وردپرس را باز می‌کند.</small>
+						</label>
+						<label data-mrncb-bot-field>Bot Token<input type="password" name="token" value="<?php echo $has_token ? '••••••••' : ''; ?>" autocomplete="new-password"><small><?php echo $editing && $has_token ? 'برای حفظ توکن فعلی، این فیلد را تغییر ندهید.' : ''; ?></small></label>
+						<label data-mrncb-bot-field>Chat / Channel ID<input name="chat_id" value="<?php echo esc_attr( $editing->chat_id ?? '' ); ?>" placeholder="123456789"><small>برای ورود سریع، باید Chat ID گفت‌وگوی خصوصی صاحب حساب باشد؛ منابع گروهی/کانالی اجازه ورود نمی‌دهند.</small></label>
+						<label data-mrncb-instagram-field hidden>روش دریافت
+							<select name="instagram_retrieval_mode" data-mrncb-instagram-mode>
+								<option value="auto" <?php selected( $editing_config['instagram_retrieval_mode'] ?? 'auto', 'auto' ); ?>>خودکار: API و سپس fallback عمومی</option>
+								<option value="api" <?php selected( $editing_config['instagram_retrieval_mode'] ?? '', 'api' ); ?>>فقط Instagram API</option>
+								<option value="public" <?php selected( $editing_config['instagram_retrieval_mode'] ?? '', 'public' ); ?>>فقط صفحه عمومی (بدون API)</option>
+							</select>
+							<small>روش عمومی best-effort است و ممکن است در اثر Rate Limit یا تغییر HTML اینستاگرام موقتاً متوقف شود.</small>
+						</label>
+						<label data-mrncb-instagram-field hidden>نام کاربری Instagram<input name="instagram_username" data-mrncb-instagram-username value="<?php echo esc_attr( $editing_config['instagram_username'] ?? '' ); ?>" placeholder="example.page"><small>برای حالت خودکار و عمومی الزامی است؛ بدون @ وارد کنید.</small></label>
+						<label data-mrncb-instagram-field hidden>Instagram Access Token<input type="password" name="instagram_access_token" value="<?php echo $has_instagram_token ? '••••••••' : ''; ?>" autocomplete="new-password"><small><?php echo $editing && $has_instagram_token ? 'برای حفظ Access Token فعلی، این فیلد را تغییر ندهید.' : 'در حالت خودکار اختیاری و در حالت فقط API الزامی است.'; ?></small></label>
+						<label data-mrncb-instagram-field hidden>Instagram User ID<input name="instagram_user_id" value="<?php echo esc_attr( $editing_config['instagram_user_id'] ?? 'me' ); ?>" placeholder="me"><small>برای حساب متصل مقدار me کافی است؛ در صورت نیاز شناسه عددی حساب را وارد کنید.</small></label>
+						<label data-mrncb-instagram-field hidden>نسخه Instagram API<input name="instagram_api_version" value="<?php echo esc_attr( $editing_config['instagram_api_version'] ?? 'v23.0' ); ?>" pattern="v[0-9]+\.[0-9]+" placeholder="v23.0"></label>
+						<label data-mrncb-instagram-field hidden>دوره بررسی صفحه Instagram
+							<select name="instagram_poll_interval">
+								<?php foreach ( array( 1800 => 'هر ۳۰ دقیقه', 3600 => 'هر ۱ ساعت (پیشنهادی)', 7200 => 'هر ۲ ساعت', 14400 => 'هر ۴ ساعت', 43200 => 'هر ۱۲ ساعت', 86400 => 'روزانه' ) as $seconds => $label ) : ?>
+									<option value="<?php echo (int) $seconds; ?>" <?php selected( (int) ( $editing_config['instagram_poll_interval'] ?? 3600 ), $seconds ); ?>><?php echo esc_html( $label ); ?></option>
+								<?php endforeach; ?>
+							</select>
+						</label>
+						<label data-mrncb-instagram-field hidden><input type="hidden" name="import_instagram_media" value="0"><input type="checkbox" name="import_instagram_media" value="1" <?php checked( $editing_config['import_instagram_media'] ?? true ); ?>> دریافت تصویر، ویدئو و اسلایدهای پست و افزودن آن‌ها به رسانه وردپرس</label>
+							<label data-mrncb-rss-field hidden>URL فید RSS/Atom<input type="url" name="feed_url" value="<?php echo esc_attr( $editing_config['feed_url'] ?? '' ); ?>" placeholder="https://example.com/feed/"></label>
+							<label data-mrncb-rss-field hidden>دوره بررسی فید
+								<select name="rss_poll_interval">
+									<?php
+									$rss_intervals = array(
+										1800   => 'هر ۳۰ دقیقه',
+										3600   => 'هر ۱ ساعت (پیشنهادی)',
+										7200   => 'هر ۲ ساعت',
+										14400  => 'هر ۴ ساعت',
+										21600  => 'هر ۶ ساعت',
+										43200  => 'هر ۱۲ ساعت',
+										86400  => 'روزانه',
+										259200 => 'هر ۳ روز',
+										604800 => 'هفتگی',
+									);
+									foreach ( $rss_intervals as $seconds => $label ) :
+										?>
+										<option value="<?php echo (int) $seconds; ?>" <?php selected( (int) ( $editing_config['rss_poll_interval'] ?? 3600 ), $seconds ); ?>><?php echo esc_html( $label ); ?></option>
+									<?php endforeach; ?>
+								</select>
+								<small>این تنظیم فقط برای RSS/Atom است؛ منابع قدیمی به‌صورت پیش‌فرض هر یک ساعت بررسی می‌شوند.</small>
+							</label>
+							<label data-mrncb-external-field hidden>دسته‌بندی پیش‌فرض
+							<select name="category_id">
+								<option value="0">— بدون دسته‌بندی اختصاصی —</option>
+								<?php foreach ( $categories as $category ) : ?>
+									<option value="<?php echo (int) $category->term_id; ?>" <?php selected( (int) ( $editing_config['category_id'] ?? 0 ), (int) $category->term_id ); ?>><?php echo esc_html( $category->name ); ?></option>
+								<?php endforeach; ?>
+							</select>
+							<small>این دسته‌بندی همیشه به نوشته‌های دریافتی از این فید افزوده می‌شود.</small>
+						</label>
+						<label data-mrncb-external-field hidden>برچسب‌های پیش‌فرض
+							<input name="default_tags" value="<?php echo esc_attr( implode( ', ', (array) ( $editing_config['default_tags'] ?? array() ) ) ); ?>" placeholder="اخبار خارجی، فید ویژه">
+							<small>چند برچسب را با ویرگول فارسی یا انگلیسی جدا کنید.</small>
+						</label>
+						<label data-mrncb-rss-field hidden><input type="hidden" name="import_feed_images" value="0"><input type="checkbox" name="import_feed_images" value="1" <?php checked( $editing_config['import_feed_images'] ?? true ); ?>> دریافت تصویر فید، افزودن به رسانه وردپرس و استفاده به‌عنوان تصویر شاخص</label>
+						<label>ربات سردبیر / تأیید انتشار
+							<select name="approval_source_id">
+								<option value="0">— بدون ربات تأیید —</option>
+								<?php foreach ( $bot_sources as $bot_source ) : ?>
+									<option value="<?php echo (int) $bot_source->id; ?>" <?php selected( (int) ( $editing_config['approval_source_id'] ?? 0 ), (int) $bot_source->id ); ?>><?php echo esc_html( $bot_source->name . ' (' . ucfirst( $bot_source->platform ) . ')' ); ?></option>
+								<?php endforeach; ?>
+							</select>
+							<small>برای هر نوع منبع می‌توانید ربات مستقلی را به‌عنوان مسیر اختصاصی سردبیر انتخاب کنید.</small>
+						</label>
+						<label>Chat ID سردبیر / تأییدکننده<input name="approval_chat_id" value="<?php echo esc_attr( $editing_config['approval_chat_id'] ?? '' ); ?>" placeholder="123456789"><small>تأیید اولیه، انتخاب دسته و پیش‌نمایش انتشار فقط به این گفتگو فرستاده می‌شود. حساب سردبیر را در «صف تأیید» نیز ثبت کنید.</small></label>
+					<div class="mrncb-fields"><label>پردازش<select name="mode"><option value="direct" <?php selected( $editing_config['mode'] ?? 'direct', 'direct' ); ?>>مستقیم</option><option value="ai" <?php selected( $editing_config['mode'] ?? '', 'ai' ); ?>>هوش مصنوعی</option></select></label><label>وضعیت نهایی<select name="post_status"><option value="draft" <?php selected( $editing_config['post_status'] ?? 'draft', 'draft' ); ?>>Draft</option><option value="pending" <?php selected( $editing_config['post_status'] ?? '', 'pending' ); ?>>Pending Review</option><option value="publish" <?php selected( $editing_config['post_status'] ?? '', 'publish' ); ?>>Publish Immediately</option><option value="schedule" <?php selected( $editing_config['post_status'] ?? '', 'schedule' ); ?>>Schedule</option></select></label></div>
+					<div class="mrncb-fields"><label>تأخیر Schedule (ثانیه)<input type="number" name="schedule_delay" value="<?php echo (int) ( $editing_config['schedule_delay'] ?? 3600 ); ?>" min="60"></label><label>رفتار خطای تصویر<select name="image_failure_mode"><option value="publish_without" <?php selected( $editing_config['image_failure_mode'] ?? 'publish_without', 'publish_without' ); ?>>انتشار بدون تصویر</option><option value="pending" <?php selected( $editing_config['image_failure_mode'] ?? '', 'pending' ); ?>>نگه‌داشتن در Pending</option><option value="retry" <?php selected( $editing_config['image_failure_mode'] ?? '', 'retry' ); ?>>Retry Workflow</option><option value="fail" <?php selected( $editing_config['image_failure_mode'] ?? '', 'fail' ); ?>>Fail کامل</option></select></label></div>
+					<label>وضعیت منبع<select name="status"><option value="active" <?php selected( $editing->status ?? 'active', 'active' ); ?>>فعال</option><option value="paused" <?php selected( $editing->status ?? '', 'paused' ); ?>>متوقف</option></select></label>
+					<label>پرامپت اختصاصی<textarea name="prompt" rows="4" placeholder="لحن، ساختار و محدودیت‌های این منبع"><?php echo esc_textarea( $editing_config['prompt'] ?? '' ); ?></textarea></label>
 					<input type="hidden" name="confirm_inbound" value="0">
-						<div class="mrncb-checks"><label data-mrncb-confirm-field><input type="checkbox" name="confirm_inbound" value="1" checked> دریافت تأیید فرستنده پیش از پردازش</label><label><input type="checkbox" name="translate" value="1"> ترجمه به زبان سایت</label><label><input type="checkbox" name="generate_images" value="1"> تولید تصویر با AI</label></div>
-					<button class="mrncb-button primary">ذخیره منبع</button>
+					<div class="mrncb-checks"><label data-mrncb-confirm-field><input type="hidden" name="confirm_inbound" value="0"><input type="checkbox" name="confirm_inbound" value="1" <?php checked( $editing_config['confirm_inbound'] ?? true ); ?>> دریافت تأیید فرستنده/سردبیر پیش از پردازش</label><label><input type="hidden" name="prepublish_review" value="0"><input type="checkbox" name="prepublish_review" value="1" <?php checked( ! empty( $editing_config['prepublish_review'] ) ); ?>> نمایش مطلب در ربات و دریافت تأیید پیش از انتشار</label><label><input type="hidden" name="require_category_selection" value="0"><input type="checkbox" name="require_category_selection" value="1" <?php checked( $editing_config['require_category_selection'] ?? true ); ?>> انتخاب دسته‌بندی در ربات پیش از انتشار</label><label><input type="checkbox" name="translate" value="1" <?php checked( ! empty( $editing_config['translate'] ) ); ?>> ترجمه به زبان سایت</label><label><input type="checkbox" name="generate_images" value="1" <?php checked( ! empty( $editing_config['generate_images'] ) ); ?>> تولید تصویر با AI</label><label><input type="hidden" name="generate_images_only_without_source" value="0"><input type="checkbox" name="generate_images_only_without_source" value="1" <?php checked( ! empty( $editing_config['generate_images_only_without_source'] ) ); ?>> فقط وقتی ورودی عکس ندارد، تصویر AI تولید شود (اقتصادی)</label></div>
+					<div class="mrncb-form-actions"><button class="mrncb-button primary"><?php echo $editing ? 'ذخیره تغییرات' : 'ذخیره منبع'; ?></button>
+					<?php if ( $editing ) : ?>
+						<a class="mrncb-button" href="<?php echo esc_url( admin_url( 'admin.php?page=mrncb-sources' ) ); ?>">انصراف</a>
+					<?php endif; ?></div>
 				</form>
 			</section>
 		</div>
@@ -418,17 +564,17 @@ final class Admin {
 		<section class="mrncb-section-head"><div><h2>صف تأیید</h2><p>Callbackها امن، یک‌بارمصرف و محدود به User IDهای مجاز هستند</p></div></section>
 		<div class="mrncb-grid sidebar">
 			<section class="mrncb-card">
-				<h3>مطالب منتظر بررسی</h3>
+				<h3>مطالب منتظر اقدام</h3>
 				<?php
-				$items = $wpdb->get_results( "SELECT * FROM {$wpdb->prefix}mrncb_workflows WHERE status='pending_review' ORDER BY id DESC LIMIT 50" ) ?: array(); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$items = $wpdb->get_results( "SELECT * FROM {$wpdb->prefix}mrncb_workflows WHERE status IN ('pending_review','awaiting_category','awaiting_revision_prompt','regenerating_text') ORDER BY id DESC LIMIT 50" ) ?: array(); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				foreach ( $items as $item ) :
 					?>
-					<div class="mrncb-row"><div><strong><?php echo esc_html( get_the_title( (int) $item->post_id ) ); ?></strong><small>Workflow #<?php echo (int) $item->id; ?> · Post #<?php echo (int) $item->post_id; ?></small></div><a href="<?php echo esc_url( get_edit_post_link( (int) $item->post_id ) ); ?>">ویرایش</a></div>
+					<div class="mrncb-row"><div><strong><?php echo esc_html( get_the_title( (int) $item->post_id ) ); ?></strong><small>Workflow #<?php echo (int) $item->id; ?> · Post #<?php echo (int) $item->post_id; ?> · <?php echo esc_html( (string) $item->status ); ?></small></div><a href="<?php echo esc_url( get_edit_post_link( (int) $item->post_id ) ); ?>">ویرایش</a></div>
 				<?php endforeach; ?>
 				<?php
 				if ( ! $items ) :
 					?>
-					<div class="mrncb-empty">مطلبی در انتظار تأیید نیست.</div><?php endif; ?>
+					<div class="mrncb-empty">مطلبی در انتظار اقدام نیست.</div><?php endif; ?>
 			</section>
 			<section class="mrncb-card">
 				<h3>افزودن تأییدکننده</h3>
@@ -517,8 +663,12 @@ final class Admin {
 			<input type="hidden" name="action" value="mrncb_save_settings"><input type="hidden" name="mrncb_scope" value="worker_image"><?php wp_nonce_field( 'mrncb_settings' ); ?>
 			<div class="mrncb-grid two">
 				<section class="mrncb-card mrncb-form"><h3>Worker</h3>
-					<div class="mrncb-fields"><label>Batch Size<input type="number" name="worker_batch_size" value="<?php echo (int) $s['worker_batch_size']; ?>"></label><label>Polling فاصله (ثانیه)<input type="number" name="poll_interval" value="<?php echo (int) $s['poll_interval']; ?>"></label></div>
-					<div class="mrncb-fields"><label>مهلت قفل (ثانیه)<input type="number" name="worker_timeout" value="<?php echo (int) $s['worker_timeout']; ?>"></label><label>انتظار Media Group<input type="number" name="media_group_wait" value="<?php echo (int) $s['media_group_wait']; ?>"></label></div>
+					<label><input type="checkbox" name="processing_enabled" value="1" <?php checked( $s['processing_enabled'] ); ?>> موتور پردازش فعال باشد</label>
+					<div class="mrncb-fields"><label>Batch Size<input type="number" name="worker_batch_size" value="<?php echo (int) $s['worker_batch_size']; ?>" min="1" max="100"></label><label>بودجه زمانی هر پاس (ثانیه)<input type="number" name="worker_time_budget" value="<?php echo (int) $s['worker_time_budget']; ?>" min="5" max="300"></label></div>
+					<div class="mrncb-fields"><label>فاصله Polling (ثانیه)<input type="number" name="poll_interval" value="<?php echo (int) $s['poll_interval']; ?>" min="1" max="300"></label><label>Timeout ربات (ثانیه)<input type="number" name="bot_poll_timeout" value="<?php echo (int) $s['bot_poll_timeout']; ?>" min="1" max="2"></label></div>
+					<div class="mrncb-fields"><label>حداکثر مطلب RSS در هر نوبت<input type="number" name="rss_batch_size" value="<?php echo (int) $s['rss_batch_size']; ?>" min="1" max="20"></label><label>سقف Job فعال<input type="number" name="queue_backpressure_limit" value="<?php echo (int) $s['queue_backpressure_limit']; ?>" min="5" max="1000"></label></div>
+					<div class="mrncb-fields"><label>توقف پس از خطای Poll (ثانیه)<input type="number" name="poll_error_cooldown" value="<?php echo (int) $s['poll_error_cooldown']; ?>" min="30" max="3600"></label><label>مهلت قفل (ثانیه)<input type="number" name="worker_timeout" value="<?php echo (int) $s['worker_timeout']; ?>"></label></div>
+					<label>انتظار Media Group (ثانیه)<input type="number" name="media_group_wait" value="<?php echo (int) $s['media_group_wait']; ?>" min="2" max="60"></label>
 					<label><input type="checkbox" name="enable_wp_cron" value="1" <?php checked( $s['enable_wp_cron'] ); ?>> فعال‌بودن WP-Cron جایگزین</label>
 					<label>زبان مقصد<input name="site_language" value="<?php echo esc_attr( $s['site_language'] ); ?>"></label>
 				</section>
@@ -526,6 +676,7 @@ final class Admin {
 					<div class="mrncb-checks"><label><input type="checkbox" name="image_featured_enabled" value="1" <?php checked( $s['image_featured_enabled'] ); ?>> تصویر شاخص</label><label><input type="checkbox" name="image_inline_enabled" value="1" <?php checked( $s['image_inline_enabled'] ); ?>> تصاویر داخل متن</label></div>
 					<div class="mrncb-fields"><label>حداکثر Inline<input type="number" name="image_inline_max" value="<?php echo (int) $s['image_inline_max']; ?>"></label><label>سقف روزانه<input type="number" name="image_daily_limit" value="<?php echo (int) $s['image_daily_limit']; ?>"></label></div>
 					<div class="mrncb-fields"><label>ابعاد<select name="image_size"><option <?php selected( $s['image_size'], '1536x1024' ); ?>>1536x1024</option><option <?php selected( $s['image_size'], '1024x1024' ); ?>>1024x1024</option><option <?php selected( $s['image_size'], '1024x1536' ); ?>>1024x1536</option></select></label><label>کیفیت<select name="image_quality"><option value="low" <?php selected( $s['image_quality'], 'low' ); ?>>Low</option><option value="medium" <?php selected( $s['image_quality'], 'medium' ); ?>>Medium</option><option value="high" <?php selected( $s['image_quality'], 'high' ); ?>>High</option></select></label></div>
+					<label>Image Base Prompt<textarea name="image_base_prompt" rows="3" placeholder="قواعد ثابت همه تصاویر؛ مانند نبود متن، لوگو و واترمارک"><?php echo esc_textarea( $s['image_base_prompt'] ); ?></textarea></label>
 					<label>Style Prompt<textarea name="image_style_prompt" rows="3"><?php echo esc_textarea( $s['image_style_prompt'] ); ?></textarea></label>
 				</section>
 			</div>
@@ -544,15 +695,19 @@ final class Admin {
 				array( 'run_worker', 'اجرای Worker', 'یک Batch از Jobهای آماده را اجرا می‌کند.', 'play' ),
 				array( 'poll', 'دریافت آخرین Updates', 'getUpdates آزمایشی برای همه منابع فعال.', 'download' ),
 				array( 'retry', 'Retry Jobهای ناموفق', 'Attemptها را بازنشانی و دوباره صف‌بندی می‌کند.', 'update' ),
+				array( 'flush_queue', 'تخلیه کامل صف', 'تمام Jobهای ذخیره‌شده را حذف و Workflowهای نیمه‌تمام را لغو می‌کند.', 'trash' ),
+				array( 'recover_rss', 'بازیابی RSSهای ناقص', 'رکوردهای failed/cancelled را آزاد می‌کند تا فید دوباره دریافت شود.', 'controls-repeat' ),
+				array( 'emergency_stop', 'توقف اضطراری پردازش', 'WP-Cron، منابع، صف و قفل‌های افزونه را متوقف می‌کند.', 'controls-pause' ),
+				array( 'resume_processing', 'فعال‌سازی موتور پردازش', 'پس از رفع مشکل اجازه اجرای Poller و Worker را می‌دهد.', 'controls-play' ),
 				array( 'unlock', 'پاک‌کردن Lock', 'فقط برای قفل منقضی یا Worker متوقف‌شده.', 'unlock' ),
 				array( 'test_openai', 'Test OpenAI', 'Responses API و مدل انتخاب‌شده را آزمایش می‌کند.', 'superhero' ),
 				array( 'test_linkedin', 'Test LinkedIn', 'اعتبار Access Token رسمی را بررسی می‌کند.', 'linkedin' ),
 			);
 			foreach ( $tools as $tool ) :
 				?>
-				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="mrncb-tool">
+				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="mrncb-tool" <?php echo in_array( $tool[0], array( 'flush_queue', 'emergency_stop' ), true ) ? 'data-mrncb-confirm="' . esc_attr( str_replace( '_', '-', $tool[0] ) ) . '"' : ''; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>>
 					<input type="hidden" name="action" value="mrncb_save_tool"><input type="hidden" name="tool" value="<?php echo esc_attr( $tool[0] ); ?>"><?php wp_nonce_field( 'mrncb_tool' ); ?>
-					<span class="dashicons dashicons-<?php echo esc_attr( $tool[3] ); ?>"></span><div><strong><?php echo esc_html( $tool[1] ); ?></strong><small><?php echo esc_html( $tool[2] ); ?></small></div><button class="mrncb-button">اجرا</button>
+					<span class="dashicons dashicons-<?php echo esc_attr( $tool[3] ); ?>"></span><div><strong><?php echo esc_html( $tool[1] ); ?></strong><small><?php echo esc_html( $tool[2] ); ?></small></div><button class="mrncb-button <?php echo in_array( $tool[0], array( 'flush_queue', 'emergency_stop' ), true ) ? 'danger' : ''; ?>">اجرا</button>
 				</form>
 			<?php endforeach; ?>
 			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="mrncb-tool">

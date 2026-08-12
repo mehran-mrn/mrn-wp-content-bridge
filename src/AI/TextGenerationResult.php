@@ -14,6 +14,7 @@ final class TextGenerationResult {
 	 * @param array<int, string>                                                              $categories
 	 * @param array<int, string>                                                              $tags
 	 * @param array<int, array{placeholder:string,prompt:string,alt?:string,caption?:string}> $inline_images
+	 * @param array<int, string>                                                              $seo_keywords
 	 */
 	public function __construct(
 		public readonly string $title,
@@ -24,6 +25,7 @@ final class TextGenerationResult {
 		public readonly string $featured_image_prompt = '',
 		public readonly array $inline_images = array(),
 		public readonly int $input_tokens = 0,
-		public readonly int $output_tokens = 0
+		public readonly int $output_tokens = 0,
+		public readonly array $seo_keywords = array()
 	) {}
 }

@@ -28,6 +28,7 @@ final class RssAdapter implements PlatformAdapterInterface {
 
 	/** @return array<int, NormalizedUpdate> */
 	public function poll( object $source ): array {
+		$config = $this->entities->config( $source );
 		$feed = $this->feed( $source );
 		$items = (array) $feed->get_items( 0, 20 );
 		$updates = array();
@@ -37,7 +38,7 @@ final class RssAdapter implements PlatformAdapterInterface {
 			$link        = esc_url_raw( (string) $item->get_permalink() );
 			$title       = sanitize_text_field( (string) $item->get_title() );
 			$description = wp_strip_all_tags( (string) ( $item->get_content() ?: $item->get_description() ) );
-			$image_url   = $this->image_url( $item );
+			$image_url   = ! array_key_exists( 'import_feed_images', $config ) || ! empty( $config['import_feed_images'] ) ? $this->image_url( $item ) : '';
 			$text        = trim( $title . "\n\n" . $description . ( $link ? "\n\n" . $link : '' ) );
 			if ( '' === $guid || '' === $text ) {
 				continue;
@@ -52,7 +53,7 @@ final class RssAdapter implements PlatformAdapterInterface {
 				array(
 					'text'       => $text,
 					'caption'    => $title,
-					'photos'     => $image_url ? array( array( 'file_id' => $image_url ) ) : array(),
+					'photos'     => $image_url ? array( array( 'file_id' => $image_url, 'file_name' => $this->image_filename( $image_url ) ) ) : array(),
 					'video'      => array(),
 					'document'   => array(),
 					'forwarded'  => false,
@@ -121,20 +122,65 @@ final class RssAdapter implements PlatformAdapterInterface {
 	}
 
 	private function image_url( object $item ): string {
-		$enclosure = $item->get_enclosure();
-		if ( $enclosure ) {
+		$enclosures = method_exists( $item, 'get_enclosures' ) ? (array) $item->get_enclosures() : array();
+		if ( ! $enclosures && method_exists( $item, 'get_enclosure' ) ) {
+			$enclosures = array_filter( array( $item->get_enclosure() ) );
+		}
+		foreach ( $enclosures as $enclosure ) {
 			$type = (string) $enclosure->get_type();
-			$link = esc_url_raw( (string) $enclosure->get_link() );
-			if ( str_starts_with( $type, 'image/' ) && wp_http_validate_url( $link ) ) {
+			$link = $this->validated_image_url( (string) $enclosure->get_link(), $item );
+			if ( $link && ( str_starts_with( $type, 'image/' ) || $this->looks_like_image( $link ) ) ) {
 				return $link;
 			}
 		}
 
+		if ( method_exists( $item, 'get_item_tags' ) ) {
+			foreach ( array( 'content', 'thumbnail' ) as $tag_name ) {
+				$tags = (array) $item->get_item_tags( 'http://search.yahoo.com/mrss/', $tag_name );
+				foreach ( $tags as $tag ) {
+					$attributes = (array) ( $tag['attribs'][''] ?? array() );
+					$url        = $this->validated_image_url( (string) ( $attributes['url'] ?? '' ), $item );
+					$type       = (string) ( $attributes['type'] ?? '' );
+					$medium     = (string) ( $attributes['medium'] ?? '' );
+					if ( $url && ( 'thumbnail' === $tag_name || 'image' === $medium || str_starts_with( $type, 'image/' ) || $this->looks_like_image( $url ) ) ) {
+						return $url;
+					}
+				}
+			}
+		}
+
 		$html = (string) ( $item->get_content() ?: $item->get_description() );
-		if ( preg_match( '/<img[^>]+src=["\']([^"\']+)["\']/i', $html, $matches ) ) {
-			$link = esc_url_raw( html_entity_decode( $matches[1], ENT_QUOTES | ENT_HTML5, 'UTF-8' ) );
-			return wp_http_validate_url( $link ) ? $link : '';
+		if ( preg_match( '/<img\b[^>]+(?:data-lazy-src|data-src|src)=["\']([^"\']+)["\']/i', $html, $matches ) ) {
+			return $this->validated_image_url( html_entity_decode( $matches[1], ENT_QUOTES | ENT_HTML5, 'UTF-8' ), $item );
 		}
 		return '';
+	}
+
+	private function validated_image_url( string $url, object $item ): string {
+		$url = trim( $url );
+		if ( str_starts_with( $url, '//' ) ) {
+			$url = 'https:' . $url;
+		} elseif ( ! preg_match( '#^https?://#i', $url ) && method_exists( $item, 'get_permalink' ) ) {
+			$base   = parse_url( (string) $item->get_permalink() );
+			$scheme = (string) ( $base['scheme'] ?? 'https' );
+			$host   = (string) ( $base['host'] ?? '' );
+			if ( $host ) {
+				$port = isset( $base['port'] ) ? ':' . (int) $base['port'] : '';
+				$path = str_starts_with( $url, '/' ) ? $url : rtrim( dirname( (string) ( $base['path'] ?? '/' ) ), '/\\' ) . '/' . $url;
+				$url  = $scheme . '://' . $host . $port . '/' . ltrim( $path, '/' );
+			}
+		}
+		$url = esc_url_raw( $url );
+		return wp_http_validate_url( $url ) ? $url : '';
+	}
+
+	private function looks_like_image( string $url ): bool {
+		$path = strtolower( (string) parse_url( $url, PHP_URL_PATH ) );
+		return (bool) preg_match( '/\.(?:jpe?g|png|gif|webp|avif)$/', $path );
+	}
+
+	private function image_filename( string $url ): string {
+		$name = sanitize_file_name( basename( (string) parse_url( $url, PHP_URL_PATH ) ) );
+		return $name && str_contains( $name, '.' ) ? $name : 'rss-image-' . substr( hash( 'sha256', $url ), 0, 12 ) . '.jpg';
 	}
 }

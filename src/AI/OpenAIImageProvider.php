@@ -57,7 +57,10 @@ final class OpenAIImageProvider implements ImageProviderInterface {
 		if ( false === $binary ) {
 			throw new \RuntimeException( 'داده تصویر OpenAI نامعتبر است.' );
 		}
-		$tmp = wp_tempnam( 'mrncb-generated.' . $format );
+		if ( ! function_exists( 'wp_tempnam' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/file.php';
+		}
+		$tmp = \wp_tempnam( 'mrncb-generated.' . $format );
 		if ( ! $tmp || false === file_put_contents( $tmp, $binary ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
 			throw new \RuntimeException( 'ذخیره موقت تصویر ممکن نشد.' );
 		}

@@ -82,7 +82,8 @@ final class JobQueue {
 		$table    = $wpdb->prefix . 'mrncb_jobs';
 		$attempts = (int) $job->attempts;
 		$max      = (int) $job->max_attempts;
-		$status   = $attempts >= $max ? 'failed' : 'retry_scheduled';
+		$auth_failure = (bool) preg_match( '/(?:unauthorized|invalid\s+(?:bot\s+)?token|http\s*401|status\s*401)/i', $error->getMessage() );
+		$status       = $error instanceof PermanentJobFailure ? 'cancelled' : ( $auth_failure || $attempts >= $max ? 'failed' : 'retry_scheduled' );
 		$delay    = min( 3600, 15 * ( 2 ** max( 0, $attempts - 1 ) ) );
 
 		$wpdb->update(
@@ -97,6 +98,104 @@ final class JobQueue {
 			),
 			array( 'id' => (int) $job->id )
 		);
+	}
+
+	public function active_count(): int {
+		global $wpdb;
+		return (int) $wpdb->get_var(
+			"SELECT COUNT(*) FROM {$wpdb->prefix}mrncb_jobs WHERE status IN ('pending','processing','retry_scheduled')" // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		);
+	}
+
+	/** @return array{jobs:int,workflows:int} */
+	public function flush(): array {
+		global $wpdb;
+		$workflows = (int) $wpdb->query(
+			"UPDATE {$wpdb->prefix}mrncb_workflows
+			SET status = 'cancelled', updated_at = UTC_TIMESTAMP()
+			WHERE status IN ('queued','article_ready','processing_assets','processing_review','regenerating_text','regenerating_image')" // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		);
+		$jobs = (int) $wpdb->query( "DELETE FROM {$wpdb->prefix}mrncb_jobs" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		return array(
+			'jobs'      => $jobs,
+			'workflows' => $workflows,
+		);
+	}
+
+	/** @return array{workflows:int,messages:int,posts:int} */
+	public function recover_incomplete_rss(): array {
+		global $wpdb;
+		$workflows = $wpdb->get_results(
+			"SELECT w.* FROM {$wpdb->prefix}mrncb_workflows w
+			INNER JOIN {$wpdb->prefix}mrncb_sources s ON s.id = w.source_id
+			WHERE s.platform = 'rss' AND w.status IN ('cancelled','failed')
+			ORDER BY w.id ASC" // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		) ?: array();
+		$counts = array(
+			'workflows' => 0,
+			'messages'  => 0,
+			'posts'     => 0,
+		);
+		$sources = array();
+
+		foreach ( $workflows as $workflow ) {
+			$post_id = (int) ( $workflow->post_id ?? 0 );
+			if ( $post_id ) {
+				$post_status = get_post_status( $post_id );
+				if ( in_array( $post_status, array( 'publish', 'future' ), true ) ) {
+					continue;
+				}
+				if ( $post_status && 'trash' !== $post_status && ! wp_trash_post( $post_id ) ) {
+					continue;
+				}
+				if ( $post_status && 'trash' !== $post_status ) {
+					++$counts['posts'];
+				}
+			}
+
+			$context     = json_decode( (string) ( $workflow->context ?? '' ), true ) ?: array();
+			$message_ids = array_values(
+				array_unique(
+					array_filter(
+						array_map( 'absint', array_merge( (array) ( $context['message_ids'] ?? array() ), array( $workflow->source_message_id ?? 0 ) ) )
+					)
+				)
+			);
+			$this->cancel_for_workflow( (int) $workflow->id );
+			$wpdb->query( 'START TRANSACTION' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
+			$deleted_messages = 0;
+			$delete_failed    = false;
+			foreach ( $message_ids as $message_id ) {
+				$deleted = $wpdb->delete( $wpdb->prefix . 'mrncb_messages', array( 'id' => $message_id ), array( '%d' ) );
+				if ( false === $deleted ) {
+					$delete_failed = true;
+					break;
+				}
+				$deleted_messages += (int) $deleted;
+			}
+			if ( $delete_failed ) {
+				$wpdb->query( 'ROLLBACK' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
+				continue;
+			}
+			$deleted = $wpdb->delete( $wpdb->prefix . 'mrncb_workflows', array( 'id' => (int) $workflow->id ), array( '%d' ) );
+			if ( false === $deleted ) {
+				$wpdb->query( 'ROLLBACK' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
+				continue;
+			}
+			$wpdb->query( 'COMMIT' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
+			$counts['workflows'] += (int) $deleted;
+			$counts['messages']  += $deleted_messages;
+			$sources[] = (int) $workflow->source_id;
+		}
+
+		foreach ( array_unique( $sources ) as $source_id ) {
+			$wpdb->update(
+				$wpdb->prefix . 'mrncb_sources',
+				array( 'last_error' => null, 'updated_at' => current_time( 'mysql', true ) ),
+				array( 'id' => $source_id )
+			);
+		}
+		return $counts;
 	}
 
 	public function retry_failed(): int {

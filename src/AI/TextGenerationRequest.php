@@ -15,6 +15,8 @@ final class TextGenerationRequest {
 		public readonly string $prompt,
 		public readonly string $language,
 		public readonly string $purpose = 'article',
-		public readonly string $tone = 'professional'
+		public readonly string $tone = 'professional',
+		/** @var array<int, array{id:int,name:string}> */
+		public readonly array $available_categories = array()
 	) {}
 }

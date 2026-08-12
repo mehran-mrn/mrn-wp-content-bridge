@@ -24,6 +24,13 @@ final class Worker {
 
 	/** @return array{processed:int,failed:int,locked:bool} */
 	public function run( ?int $batch_size = null ): array {
+		if ( ! $this->settings->get( 'processing_enabled', true ) ) {
+			return array(
+				'processed' => 0,
+				'failed'    => 0,
+				'locked'    => false,
+			);
+		}
 		$worker_id = wp_generate_uuid4();
 		if ( ! $this->acquire_lock( $worker_id ) ) {
 			return array(
@@ -36,8 +43,17 @@ final class Worker {
 		$processed = 0;
 		$failed    = 0;
 		try {
-			$batch = $batch_size ?? (int) $this->settings->get( 'worker_batch_size', 10 );
-			foreach ( $this->queue->reserve( $batch, $worker_id ) as $job ) {
+			$batch    = max( 1, $batch_size ?? (int) $this->settings->get( 'worker_batch_size', 5 ) );
+			$deadline = microtime( true ) + max( 5, (int) $this->settings->get( 'worker_time_budget', 20 ) );
+			for ( $index = 0; $index < $batch; ++$index ) {
+				if ( $index > 0 && microtime( true ) >= $deadline ) {
+					break;
+				}
+				$jobs = $this->queue->reserve( 1, $worker_id );
+				if ( ! $jobs ) {
+					break;
+				}
+				$job = reset( $jobs );
 				try {
 					$payload = json_decode( (string) $job->payload, true ) ?: array();
 					$this->router->handle( (string) $job->type, $payload, (int) $job->id );

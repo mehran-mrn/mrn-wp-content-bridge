@@ -113,6 +113,7 @@
 .mrncb-row:last-child { border: 0; }
 .mrncb-row strong { display: block; }
 .mrncb-row small { display: block; margin-top: 5px; color: var(--mcb-muted); }
+.mrncb-row small.mrncb-error-text { color: #9e3440; }
 .mrncb-row a { color: var(--mcb-green); }
 .mrncb-empty { padding: 34px 18px; color: var(--mcb-muted); text-align: center; border: 1px dashed #c9d7d2; border-radius: 12px; background: #fafcfb; }
 
@@ -123,6 +124,13 @@
 .mrncb-button { display: inline-flex; align-items: center; justify-content: center; min-height: 38px; padding: 0 15px; color: var(--mcb-green); font-weight: 600; text-decoration: none; border: 1px solid #a9c9be; border-radius: 9px; background: #fff; cursor: pointer; }
 .mrncb-button:hover { color: #075c47; border-color: var(--mcb-green); }
 .mrncb-button.primary { color: #fff; border-color: var(--mcb-green); background: linear-gradient(135deg, var(--mcb-green), var(--mcb-green-2)); box-shadow: 0 7px 18px rgb(15 123 95 / 18%); }
+.mrncb-button.danger { color: #9e3440; border-color: #e5aeb5; }
+.mrncb-button.danger:hover { color: #7d202b; border-color: #c86572; background: #fff5f6; }
+.mrncb-button.compact { min-height: 31px; padding: 0 10px; font-size: 12px; }
+.mrncb-source-actions,
+.mrncb-form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.mrncb-source-actions { justify-content: flex-end; }
+.mrncb-source-actions form { margin: 0; }
 
 .mrncb-form { display: grid; gap: 14px; }
 .mrncb-form label { display: grid; gap: 7px; color: #40534c; font-weight: 600; }

@@ -1,6 +1,6 @@
 {
   "name": "mehran-mrn/mrn-wp-content-bridge",
-  "description": "Modular WordPress content bridge for Telegram, Bale, LinkedIn and AI providers.",
+  "description": "Modular WordPress content bridge for Telegram, Bale, RSS, Instagram, LinkedIn and AI providers.",
   "type": "wordpress-plugin",
   "license": "GPL-2.0-or-later",
   "authors": [

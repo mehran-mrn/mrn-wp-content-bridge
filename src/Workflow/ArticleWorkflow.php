@@ -59,6 +59,17 @@ final class ArticleWorkflow {
 			);
 			return;
 		}
+		if ( $this->approvals->handle_revision_message( $message ) ) {
+			$wpdb->update(
+				$messages_table,
+				array(
+					'status'       => 'processed',
+					'processed_at' => current_time( 'mysql', true ),
+				),
+				array( 'id' => $message_id )
+			);
+			return;
+		}
 
 		$group = array( $message );
 		if ( $message->media_group_id ) {
@@ -137,7 +148,10 @@ final class ArticleWorkflow {
 				new TextGenerationRequest(
 					$text,
 					(string) ( $config['prompt'] ?: $this->settings->get( 'openai_default_prompt', '' ) ),
-					(string) $this->settings->get( 'site_language', get_bloginfo( 'language' ) )
+					(string) $this->settings->get( 'site_language', get_bloginfo( 'language' ) ),
+					'article',
+					'professional',
+					$this->available_categories()
 				)
 			)
 			: $this->direct_result( $text );
@@ -148,6 +162,7 @@ final class ArticleWorkflow {
 			'content_html'          => wp_kses_post( $result->content_html ),
 			'categories'            => array_map( 'sanitize_text_field', $result->categories ),
 			'tags'                  => array_map( 'sanitize_text_field', $result->tags ),
+			'seo_keywords'          => array_map( 'sanitize_text_field', $result->seo_keywords ),
 			'featured_image_prompt' => sanitize_textarea_field( $result->featured_image_prompt ),
 			'inline_images'         => $result->inline_images,
 		);
@@ -200,6 +215,12 @@ final class ArticleWorkflow {
 			$post_id  = (int) ( $existing[0] ?? 0 );
 		}
 		if ( ! $post_id ) {
+				$is_external_source = in_array( (string) $source->platform, array( 'rss', 'instagram' ), true );
+				$tags          = (array) ( $article['tags'] ?? array() );
+				if ( $is_external_source ) {
+				$tags = array_merge( $tags, (array) ( $config['default_tags'] ?? array() ) );
+			}
+			$tags = array_values( array_unique( array_filter( array_map( 'sanitize_text_field', $tags ) ) ) );
 			$post_id = wp_insert_post(
 				array(
 					'post_title'    => sanitize_text_field( $article['title'] ?? '' ),
@@ -208,11 +229,13 @@ final class ArticleWorkflow {
 					'post_status'   => 'draft',
 					'post_type'     => 'post',
 					'post_author'   => (int) ( $config['author_id'] ?? 1 ),
-					'post_category' => $this->category_ids( (array) ( $article['categories'] ?? array() ), (int) ( $config['category_id'] ?? 0 ) ),
-					'tags_input'    => (array) ( $article['tags'] ?? array() ),
+						'post_category' => $this->category_ids( (array) ( $article['categories'] ?? array() ), (int) ( $config['category_id'] ?? 0 ), $is_external_source ),
+					'tags_input'    => $tags,
 					'meta_input'    => array(
 						'_mrncb_workflow_id' => $workflow_id,
 						'_mrncb_source_id'   => (int) $source->id,
+						'_mrncb_seo_keywords' => implode( ', ', array_map( 'sanitize_text_field', (array) ( $article['seo_keywords'] ?? array() ) ) ),
+						'_mrncb_featured_image_prompt' => sanitize_textarea_field( (string) ( $article['featured_image_prompt'] ?? '' ) ),
 					),
 				),
 				true
@@ -250,8 +273,12 @@ final class ArticleWorkflow {
 			}
 		}
 
-		$image_jobs = 0;
-		if ( empty( $context['image_jobs_dispatched'] ) && ! empty( $config['generate_images'] ) ) {
+		$source_messages  = $this->messages( (array) ( $context['message_ids'] ?? array() ) );
+		$has_source_image = $this->messages_have_source_image( $source_messages );
+		$generate_images  = ! empty( $config['generate_images'] )
+			&& ( empty( $config['generate_images_only_without_source'] ) || ! $has_source_image );
+		$image_jobs       = 0;
+		if ( empty( $context['image_jobs_dispatched'] ) && $generate_images ) {
 			if ( ! empty( $article['featured_image_prompt'] ) && $this->settings->get( 'image_featured_enabled', false ) ) {
 				$this->queue->dispatch(
 					'generate_image',
@@ -289,6 +316,10 @@ final class ArticleWorkflow {
 		$context['asset_jobs_dispatched'] = true;
 		$context['image_jobs_dispatched'] = true;
 		$context['image_jobs']            = $image_jobs;
+		$context['source_image_detected'] = $has_source_image;
+		$context['ai_images_skipped_for_source_image'] = ! empty( $config['generate_images'] )
+			&& ! empty( $config['generate_images_only_without_source'] )
+			&& $has_source_image;
 		$wpdb->update(
 			$wpdb->prefix . 'mrncb_workflows',
 			array(
@@ -322,37 +353,79 @@ final class ArticleWorkflow {
 		}
 		$meta_key      = '_mrncb_message_attachment_' . $message_id;
 		$attachment_id = absint( get_post_meta( $post_id, $meta_key, true ) );
-		if ( $attachment_id ) {
-			return;
-		}
 		$message = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$wpdb->prefix}mrncb_messages WHERE id = %d", $message_id ) );
 		$source  = $this->entities->source( (int) $workflow->source_id );
 		if ( ! $message || ! $source ) {
 			throw new \RuntimeException( 'پیام یا منبع رسانه پیدا نشد.' );
 		}
 		$message_payload = json_decode( (string) $message->payload, true ) ?: array();
-		$attachment_id   = $this->media->import( $source, $message_payload, $post_id );
 		if ( ! $attachment_id ) {
-			return;
-		}
-		update_post_meta( $post_id, $meta_key, $attachment_id );
-		if ( wp_attachment_is_image( $attachment_id ) && ! has_post_thumbnail( $post_id ) ) {
-			set_post_thumbnail( $post_id, $attachment_id );
-			return;
-		}
-		$poster_id = $this->media->poster_id( $attachment_id );
-		if ( $poster_id && ! has_post_thumbnail( $post_id ) ) {
-			set_post_thumbnail( $post_id, $poster_id );
+			$attachment_id = $this->media->import( $source, $message_payload, $post_id );
+			if ( $attachment_id ) {
+				update_post_meta( $post_id, $meta_key, $attachment_id );
+			}
 		}
 
-		$content = (string) get_post_field( 'post_content', $post_id );
-		$block   = $this->media->content_block( $attachment_id );
-		wp_update_post(
-			array(
-				'ID'           => $post_id,
-				'post_content' => wp_kses_post( $content . "\n" . $block ),
-			)
-		);
+		$attachment_ids = $this->media->import_linked_files( $message_payload, $post_id );
+		$content        = (string) get_post_field( 'post_content', $post_id );
+		$localized      = $this->media->localize_imported_links( $content, $message_payload, $post_id );
+		if ( $localized !== $content ) {
+			$localized_update = wp_update_post(
+				array(
+					'ID'           => $post_id,
+					'post_content' => wp_kses_post( $localized ),
+				),
+				true
+			);
+			if ( is_wp_error( $localized_update ) ) {
+				throw new \RuntimeException( esc_html( $localized_update->get_error_message() ) );
+			}
+		}
+		if ( $attachment_id ) {
+			array_unshift( $attachment_ids, $attachment_id );
+		}
+		foreach ( array_values( array_unique( array_map( 'absint', $attachment_ids ) ) ) as $current_attachment_id ) {
+			if ( ! $current_attachment_id ) {
+				continue;
+			}
+			if ( wp_attachment_is_image( $current_attachment_id ) ) {
+				if ( ! has_post_thumbnail( $post_id ) ) {
+					set_post_thumbnail( $post_id, $current_attachment_id );
+				}
+				continue;
+			}
+
+			$poster_id = $this->media->poster_id( $current_attachment_id );
+			if ( $poster_id && ! has_post_thumbnail( $post_id ) ) {
+				set_post_thumbnail( $post_id, $poster_id );
+			}
+			$rendered_meta_key = '_mrncb_attachment_rendered_' . $current_attachment_id;
+			if ( get_post_meta( $post_id, $rendered_meta_key, true ) ) {
+				continue;
+			}
+
+			$content = (string) get_post_field( 'post_content', $post_id );
+			$block   = $this->media->content_block( $current_attachment_id );
+			if ( str_contains( $block, 'mrncb-download-card--archive' ) ) {
+				$updated_content = $content . "\n" . $block;
+			} else {
+				$archive_position = strpos( $content, '<div class="mrncb-download-card mrncb-download-card--archive' );
+				$updated_content  = false === $archive_position
+					? $content . "\n" . $block
+					: substr( $content, 0, $archive_position ) . $block . "\n" . substr( $content, $archive_position );
+			}
+			$updated = wp_update_post(
+				array(
+					'ID'           => $post_id,
+					'post_content' => wp_kses_post( $updated_content ),
+				),
+				true
+			);
+			if ( is_wp_error( $updated ) ) {
+				throw new \RuntimeException( esc_html( $updated->get_error_message() ) );
+			}
+			update_post_meta( $post_id, $rendered_meta_key, current_time( 'mysql', true ) );
+		}
 	}
 
 	public function regenerate_article( int $workflow_id ): void {
@@ -369,11 +442,24 @@ final class ArticleWorkflow {
 		$config   = $this->entities->config( $source );
 		$messages = $this->messages( (array) ( $context['message_ids'] ?? array() ) );
 		$text     = trim( implode( "\n\n", array_filter( array_map( static fn( $m ) => (string) ( json_decode( $m->payload, true )['text'] ?? '' ), $messages ) ) ) );
+		$revision_prompt = trim( (string) ( $context['revision_prompt'] ?? '' ) );
+		$prompt          = (string) ( $config['prompt'] ?: $this->settings->get( 'openai_default_prompt', '' ) );
+		$generation_source = $text;
+		if ( '' !== $revision_prompt ) {
+			$prompt .= "\n\nRevise the article according to this trusted editorial instruction from the reviewer. Apply it precisely while preserving factual accuracy: " . $revision_prompt;
+			$generation_source = "Original source material:\n" . $text
+				. "\n\nCurrent article draft to revise:\nTitle: " . get_the_title( (int) $workflow->post_id )
+				. "\nExcerpt: " . (string) get_post_field( 'post_excerpt', (int) $workflow->post_id )
+				. "\nContent:\n" . (string) get_post_field( 'post_content', (int) $workflow->post_id );
+		}
 		$result   = $this->providers->text()->generate(
 			new TextGenerationRequest(
-				$text,
-				(string) ( $config['prompt'] ?: $this->settings->get( 'openai_default_prompt', '' ) ),
-				(string) $this->settings->get( 'site_language', get_bloginfo( 'language' ) )
+				$generation_source,
+				$prompt,
+				(string) $this->settings->get( 'site_language', get_bloginfo( 'language' ) ),
+				'article',
+				'professional',
+				$this->available_categories()
 			)
 		);
 		$updated  = wp_update_post(
@@ -390,10 +476,31 @@ final class ArticleWorkflow {
 		if ( is_wp_error( $updated ) ) {
 			throw new \RuntimeException( esc_html( $updated->get_error_message() ) );
 		}
+		$context['article'] = array(
+			'title'                 => $this->titles->normalize( $result->title, $text ),
+			'excerpt'               => $result->excerpt,
+			'content_html'          => wp_kses_post( $result->content_html ),
+			'categories'            => array_map( 'sanitize_text_field', $result->categories ),
+			'tags'                  => array_map( 'sanitize_text_field', $result->tags ),
+			'seo_keywords'          => array_map( 'sanitize_text_field', $result->seo_keywords ),
+			'featured_image_prompt' => sanitize_textarea_field( $result->featured_image_prompt ),
+			'inline_images'         => $result->inline_images,
+		);
+		if ( '' !== $revision_prompt ) {
+			$context['revision_history'][] = array(
+				'prompt'       => $revision_prompt,
+				'requested_by' => (string) ( $context['revision_requested_by'] ?? '' ),
+				'completed_at' => current_time( 'mysql', true ),
+			);
+			unset( $context['revision_prompt'], $context['revision_requested_by'], $context['revision_requested_at'], $context['revision_prompt_expires'] );
+		}
+		update_post_meta( (int) $workflow->post_id, '_mrncb_seo_keywords', implode( ', ', $context['article']['seo_keywords'] ) );
+		update_post_meta( (int) $workflow->post_id, '_mrncb_featured_image_prompt', $context['article']['featured_image_prompt'] );
 		$wpdb->update(
 			$wpdb->prefix . 'mrncb_workflows',
 			array(
 				'status'     => 'pending_review',
+				'context'    => wp_json_encode( $context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ),
 				'updated_at' => current_time( 'mysql', true ),
 			),
 			array( 'id' => $workflow_id )
@@ -444,6 +551,10 @@ final class ArticleWorkflow {
 			throw new \RuntimeException( esc_html( $id->get_error_message() ) );
 		}
 		update_post_meta( $id, '_mrncb_ai_generated', current_time( 'mysql', true ) );
+		update_post_meta( $id, '_mrncb_ai_prompt', $prompt );
+		if ( '' !== $generated->revised_prompt ) {
+			update_post_meta( $id, '_mrncb_ai_revised_prompt', $generated->revised_prompt );
+		}
 		update_post_meta( $id, '_wp_attachment_image_alt', sanitize_text_field( $payload['alt'] ?? get_the_title( $post_id ) ) );
 
 		if ( 'featured' === ( $payload['kind'] ?? '' ) ) {
@@ -562,7 +673,64 @@ final class ArticleWorkflow {
 				throw new \RuntimeException( 'تولید تصویر ناموفق است و Workflow در انتظار Retry باقی ماند.' );
 			}
 		}
+		$source          = $this->entities->source( (int) $workflow->source_id );
+		$source_config   = $source ? $this->entities->config( $source ) : array();
+		$category_needed = $source
+			&& in_array( (string) $source->platform, array( 'telegram', 'bale' ), true )
+			&& ( ! array_key_exists( 'require_category_selection', $source_config ) || ! empty( $source_config['require_category_selection'] ) );
+		if ( $category_needed && empty( $context['selected_category_id'] ) ) {
+			$wpdb->update(
+				$wpdb->prefix . 'mrncb_workflows',
+				array(
+					'status'     => 'awaiting_category',
+					'updated_at' => current_time( 'mysql', true ),
+				),
+				array( 'id' => $workflow_id )
+			);
+			if ( empty( $context['category_request_queued'] ) ) {
+				$context['category_request_queued'] = true;
+				$wpdb->update(
+					$wpdb->prefix . 'mrncb_workflows',
+					array( 'context' => wp_json_encode( $context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ) ),
+					array( 'id' => $workflow_id )
+				);
+				$this->queue->dispatch( 'request_category_selection', array( 'workflow_id' => $workflow_id ), 0, 3 );
+			}
+			return;
+		}
+
 		$target = (string) ( $context['target_status'] ?? 'draft' );
+		$review_channel_available = $source && (
+			( ! empty( $source_config['approval_source_id'] ) && ! empty( $source_config['approval_chat_id'] ) )
+			|| in_array( (string) $source->platform, array( 'telegram', 'bale' ), true )
+		);
+		$prepublish_review = $review_channel_available
+			&& ! empty( $source_config['prepublish_review'] )
+			&& in_array( $target, array( 'publish', 'schedule', 'future' ), true );
+		if ( $prepublish_review && empty( $context['prepublish_review_approved_at'] ) ) {
+			$context['review_target_status'] = $target;
+			$result = wp_update_post(
+				array(
+					'ID'          => (int) $workflow->post_id,
+					'post_status' => 'pending',
+				),
+				true
+			);
+			if ( is_wp_error( $result ) ) {
+				throw new \RuntimeException( esc_html( $result->get_error_message() ) );
+			}
+			$wpdb->update(
+				$wpdb->prefix . 'mrncb_workflows',
+				array(
+					'status'     => 'pending_review',
+					'context'    => wp_json_encode( $context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ),
+					'updated_at' => current_time( 'mysql', true ),
+				),
+				array( 'id' => $workflow_id )
+			);
+			$this->queue->dispatch( 'request_approval', array( 'workflow_id' => $workflow_id ), 0, 3 );
+			return;
+		}
 		$status = match ( $target ) {
 			'publish' => 'publish',
 			'pending' => 'pending',
@@ -609,6 +777,24 @@ final class ArticleWorkflow {
 		return $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$wpdb->prefix}mrncb_workflows WHERE id = %d", $id ) ) ?: null;
 	}
 
+	/** @param array<int, object> $messages */
+	private function messages_have_source_image( array $messages ): bool {
+		foreach ( $messages as $message ) {
+			if ( 'photo' === (string) ( $message->message_type ?? '' ) ) {
+				return true;
+			}
+			$payload = json_decode( (string) ( $message->payload ?? '' ), true ) ?: array();
+			if ( ! empty( $payload['photos'] ) ) {
+				return true;
+			}
+			$mime_type = strtolower( (string) ( $payload['document']['mime_type'] ?? '' ) );
+			if ( str_starts_with( $mime_type, 'image/' ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	/** @param array<int, int|string> $ids
 	 *  @return array<int, object>
 	 */
@@ -631,20 +817,38 @@ final class ArticleWorkflow {
 	/** @param array<int, string> $names
 	 *  @return array<int, int>
 	 */
-	private function category_ids( array $names, int $fallback ): array {
+	private function category_ids( array $names, int $fallback, bool $always_include_fallback = false ): array {
 		$ids = array();
 		foreach ( $names as $name ) {
 			$term = term_exists( $name, 'category' );
-			if ( ! $term ) {
-				$term = wp_insert_term( $name, 'category' );
-			}
-			if ( ! is_wp_error( $term ) ) {
+			if ( $term && ! is_wp_error( $term ) ) {
 				$ids[] = (int) ( is_array( $term ) ? $term['term_id'] : $term );
 			}
 		}
-		if ( ! $ids && $fallback ) {
+		if ( $fallback && ( ! $ids || $always_include_fallback ) ) {
 			$ids[] = $fallback;
 		}
-		return $ids;
+		return array_values( array_unique( $ids ) );
+	}
+
+	/** @return array<int, array{id:int,name:string}> */
+	private function available_categories(): array {
+		$categories = get_categories(
+			array(
+				'hide_empty' => false,
+				'orderby'    => 'name',
+				'order'      => 'ASC',
+			)
+		);
+		if ( is_wp_error( $categories ) ) {
+			return array();
+		}
+		return array_map(
+			static fn( object $category ): array => array(
+				'id'   => (int) $category->term_id,
+				'name' => sanitize_text_field( (string) $category->name ),
+			),
+			$categories
+		);
 	}
 }

@@ -18,6 +18,7 @@ use MRN\ContentBridge\Infrastructure\Installer;
 use MRN\ContentBridge\Infrastructure\Logger;
 use MRN\ContentBridge\Infrastructure\SecretVault;
 use MRN\ContentBridge\Platform\BaleAdapter;
+use MRN\ContentBridge\Platform\InstagramAdapter;
 use MRN\ContentBridge\Platform\LinkedInAdapter;
 use MRN\ContentBridge\Platform\PlatformRegistry;
 use MRN\ContentBridge\Platform\RssAdapter;
@@ -28,6 +29,7 @@ use MRN\ContentBridge\Queue\Worker;
 use MRN\ContentBridge\Workflow\ApprovalService;
 use MRN\ContentBridge\Workflow\ArticleWorkflow;
 use MRN\ContentBridge\Workflow\MediaImporter;
+use MRN\ContentBridge\Workflow\MagicLoginService;
 use MRN\ContentBridge\Workflow\MessagePoller;
 use MRN\ContentBridge\Workflow\NotificationService;
 use MRN\ContentBridge\Workflow\SocialPublisher;
@@ -63,25 +65,38 @@ final class Plugin {
 		$telegram  = new TelegramAdapter( $entities, $settings );
 		$bale      = new BaleAdapter( $entities, $settings );
 		$rss       = new RssAdapter( $entities );
+		$instagram = new InstagramAdapter( $entities );
 		$linkedin  = new LinkedInAdapter( $settings );
 		$platforms->register( $telegram );
 		$platforms->register( $bale );
 		$platforms->register( $rss );
+		$platforms->register( $instagram );
 		$platforms->register( $linkedin );
 
 		$providers = new ProviderRegistry();
 		$providers->register_text( new OpenAITextProvider( $settings ) );
 		$providers->register_image( new OpenAIImageProvider( $settings ) );
 
-		$approvals     = new ApprovalService( $entities, $platforms, $queue, $logger );
+		$magic_login   = new MagicLoginService( $entities, $logger );
+		$magic_login->register();
+		$approvals     = new ApprovalService( $entities, $platforms, $queue, $logger, $magic_login );
 		$poller        = new MessagePoller( $entities, $platforms, $queue, $settings, $logger );
-		$media         = new MediaImporter( $platforms, $settings );
+			$media         = new MediaImporter( $platforms, $settings );
 		$titles        = new TitleExtractor();
 		$articles      = new ArticleWorkflow( $entities, $providers, $media, $queue, $settings, $approvals, $titles );
 		$social        = new SocialPublisher( $entities, $platforms, $providers, $queue, $settings );
 		$notifications = new NotificationService( $entities, $platforms );
 		$router        = new JobRouter( $poller, $articles, $approvals, $social, $notifications );
-		$worker        = new Worker( $queue, $router, $settings, $logger );
+			$worker        = new Worker( $queue, $router, $settings, $logger );
+
+			add_shortcode( 'mrncb_pdf', array( $media, 'render_pdf_shortcode' ) );
+			add_filter( 'upload_mimes', array( $media, 'allowed_upload_mimes' ) );
+			add_action(
+				'wp_enqueue_scripts',
+				static function (): void {
+					wp_enqueue_style( 'mrn-content-bridge', MRNCB_URL . 'assets/css/content.css', array(), MRNCB_VERSION );
+				}
+			);
 
 		add_filter(
 			'cron_schedules',
@@ -99,7 +114,7 @@ final class Plugin {
 		add_action(
 			'mrncb_worker_tick',
 			static function () use ( $settings, $poller, $worker ): void {
-				if ( $settings->get( 'enable_wp_cron', true ) ) {
+				if ( $settings->get( 'processing_enabled', true ) && $settings->get( 'enable_wp_cron', true ) ) {
 					$poller->poll();
 					$worker->run();
 					global $wpdb;

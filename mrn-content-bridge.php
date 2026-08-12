@@ -2,8 +2,8 @@
 /**
  * Plugin Name:       MRN Content Bridge
  * Plugin URI:        https://github.com/mehran-mrn/mrn-wp-content-bridge
- * Description:       Smart modular bridge for receiving, processing, and publishing content across WordPress, Telegram, Bale, LinkedIn, and AI services. پشتیبانی کامل از رابط فارسی نیز ارائه می‌شود.
- * Version:           1.2.2
+ * Description:       Smart modular bridge for receiving, processing, and publishing content across WordPress, Telegram, Bale, RSS, Instagram, LinkedIn, and AI services. پشتیبانی کامل از رابط فارسی نیز ارائه می‌شود.
+ * Version:           1.7.0
  * Requires at least: 6.5
  * Requires PHP:      8.1
  * Author:            Mehran Marandi
@@ -17,7 +17,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'MRNCB_VERSION', '1.2.2' );
+define( 'MRNCB_VERSION', '1.7.0' );
 define( 'MRNCB_FILE', __FILE__ );
 define( 'MRNCB_PATH', plugin_dir_path( __FILE__ ) );
 define( 'MRNCB_URL', plugin_dir_url( __FILE__ ) );
