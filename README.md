@@ -1,8 +1,8 @@
 # MRN Content Bridge
 
-افزونه مستقل و ماژولار وردپرس برای دریافت محتوا از Telegram و Bale، پردازش مستقیم یا هوشمند، ساخت نوشته وردپرس، تأیید انسانی و انتشار دوباره مطالب سایت در شبکه‌های اجتماعی.
+افزونه مستقل و ماژولار وردپرس برای دریافت محتوا از Telegram، Bale، RSS و Instagram، پردازش مستقیم یا هوشمند، ساخت نوشته وردپرس، تأیید انسانی و انتشار دوباره مطالب سایت در شبکه‌های اجتماعی.
 
-نسخه فعلی: `1.2.2`
+نسخه فعلی: `1.7.0`
 
 حداقل وردپرس: `6.5`
 
@@ -12,17 +12,34 @@
 
 - دریافت Telegram و Bale فقط با Long Polling و متد `getUpdates`؛ بدون Webhook
 - Worker مستقل از ترافیک سایت با WP-CLI، Cron واقعی سرور و WP-Cron جایگزین
+- کنترل فشار صف با Batch محدود RSS، سقف Job فعال، بودجه زمانی Worker و توقف خودکار منبع دارای خطای احراز هویت
+- ابزار تخلیه کامل صف با تأیید صریح مدیر و لغو Workflowهای نیمه‌تمام
 - قفل Worker، Batch Size، Polling interval، Retry با exponential backoff و زمان آخرین اجرای موفق
 - پشتیبانی از Text، Link، Photo + Caption، Media Group، Video + Caption، Document، Forwarded Message، Channel Post و Edited Channel Post
+- دریافت امن لینک مستقیم ویدئو، صوت، PDF، ZIP و RAR از متن پیام تا سقف کمتر از ۹۹ مگابایت و ذخیره در کتابخانه رسانه
+- ساخت پلیر ویدئو/صوت، نمایشگر مرورگری PDF، کارت دانلود آرشیو و تصویر شاخص از thumbnail پیام‌رسان یا فریم FFmpeg
+- دریافت تکرارناپذیر RSS/Atom با دسته‌بندی و برچسب‌های پیش‌فرض اختصاصی برای هر فید
+- دریافت Instagram از API رسمی یا fallback بدون API برای صفحات عمومی، همراه با تصویر، ویدئو و Carousel
+- شناسه پایدار مبتنی بر permalink برای جلوگیری از ثبت و انتشار تکراری Instagram حتی هنگام جابه‌جایی بین API و fallback
+- انتخاب نویسنده وردپرس به‌صورت مستقل برای تمام منابع ورودی
+- مسیر سردبیر اختصاصی Telegram/Bale برای هر منبع Telegram، Bale، RSS یا Instagram؛ بدون ارسال تأیید به افراد نامرتبط
+- ورود سریع یک‌بارمصرف ۶۰ ثانیه‌ای از گفت‌وگوی خصوصی هر منبع ربات فعال، متصل به حساب نویسنده همان منبع
+- فرمان `/login`، پیام «ورود سریع» و دکمه ربات برای ساخت لینک تازه بدون نام کاربری و رمز عبور
+- استخراج تصویر RSS از enclosure، Media RSS و HTML، انتقال به کتابخانه رسانه و تنظیم خودکار تصویر شاخص
+- ارسال پیش‌نمایش مطالب RSS به ربات Telegram/Bale و دریافت تأیید، رد یا درخواست اصلاح پیش از انتشار
 - تجمیع پیام‌های دارای `media_group_id` در یک Workflow
 - دانلود فایل با API پلتفرم، کنترل حجم/MIME و ورود امن به Media Library
 - حالت مستقیم، Rewrite/Translate با OpenAI و پرامپت اختصاصی هر Source
 - خروجی HTML تمیز و `wp_kses_post`؛ طراحی آماده برای افزودن Gutenberg renderer
 - Providerهای مستقل متن و تصویر با Interface و registry قابل توسعه
 - Responses API برای متن ساختاریافته و Images API برای تولید تصویر
+- خروجی ساختاریافته شامل عنوان، چکیده، HTML امن، برچسب‌ها، کلیدواژه‌های SEO و پرامپت تصویر
+- ارسال دسته‌بندی‌های واقعی وردپرس به ربات و توقف انتشار تا انتخاب امن یک دسته‌بندی
 - Job مستقل برای تولید متن، تصویر، جایگزینی placeholder، تأیید و انتشار اجتماعی
 - Draft، Pending Review، Publish Immediately و Schedule
 - تأیید Telegram/Bale با callback token امن و یک‌بارمصرف، allowlist تأییدکننده و Audit Log
+- بازبینی اختیاری پیش از انتشار در ربات با تأیید، رد یا درخواست اصلاح متنی؛ پیام اصلاح به همان Workflow متصل می‌شود و مطلب تازه نمی‌سازد
+- حالت اقتصادی تولید تصویر: امکان تولید تصویر AI فقط وقتی ورودی هیچ عکس یا سند تصویری ندارد
 - متاباکس «MRN Social Publishing» برای متن دستی یا تولید هوشمند مستقل هر پلتفرم
 - انتشار idempotent و مستقل برای هر مقصد؛ شکست یک مقصد مانع بقیه نیست
 - LinkedIn OAuth 2.0، Images API و Posts API رسمی
@@ -60,6 +77,16 @@ LinkedIn API مکانیزم `getUpdates` ندارد. این افزونه برا�
 - نسخه پیش‌فرض هدر API در این release برابر `202607` و از پنل قابل تغییر است.
 
 مراجع رسمی: [LinkedIn OAuth](https://learn.microsoft.com/en-us/linkedin/shared/authentication/authorization-code-flow)، [Posts API](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/posts-api)، [Images API](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/images-api)
+
+## Instagram
+
+برای هر منبع Instagram سه روش دریافت وجود دارد:
+
+- `auto`: ابتدا API رسمی و در صورت خطا fallback صفحه عمومی
+- `api`: فقط API رسمی؛ Access Token الزامی است
+- `public`: فقط HTML صفحه عمومی؛ بدون نیاز به Token
+
+fallback عمومی داده JSON جاسازی‌شده در صفحه، لینک‌های Post/Reel و متادیتای Open Graph را بررسی می‌کند. این روش best-effort است و به‌دلیل تغییر HTML، خصوصی بودن حساب، صفحه ورود یا Rate Limit اینستاگرام ممکن است موقتاً چیزی دریافت نکند. برای سرویس پایدار، API رسمی پیشنهاد می‌شود.
 
 ## OpenAI
 

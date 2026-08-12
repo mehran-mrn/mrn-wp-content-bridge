@@ -13,6 +13,7 @@ use MRN\ContentBridge\Core\Settings;
 use MRN\ContentBridge\Infrastructure\EntityRepository;
 use MRN\ContentBridge\Platform\PlatformRegistry;
 use MRN\ContentBridge\Queue\JobQueue;
+use MRN\ContentBridge\Queue\PermanentJobFailure;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -43,6 +44,10 @@ final class SocialPublisher {
 
 		$selected = array_map( 'absint', (array) get_post_meta( $post_id, '_mrncb_social_destinations', true ) );
 		foreach ( $selected as $destination_id ) {
+			$destination = $this->entities->destination( $destination_id );
+			if ( ! $destination || 'active' !== (string) $destination->status ) {
+				continue;
+			}
 			$this->queue->dispatch(
 				'publish_social',
 				array(
@@ -63,8 +68,8 @@ final class SocialPublisher {
 		global $wpdb;
 		$destination = $this->entities->destination( $destination_id );
 		$post        = get_post( $post_id );
-		if ( ! $destination || ! $post || 'publish' !== $post->post_status ) {
-			throw new \RuntimeException( 'پست یا مقصد انتشار اجتماعی معتبر نیست.' );
+		if ( ! $destination || 'active' !== (string) $destination->status || ! $post || 'publish' !== $post->post_status ) {
+			throw new PermanentJobFailure( 'پست یا مقصد انتشار اجتماعی معتبر نیست؛ Job لغو شد و دوباره تلاش نمی‌شود.' );
 		}
 
 		$table  = $wpdb->prefix . 'mrncb_social_posts';

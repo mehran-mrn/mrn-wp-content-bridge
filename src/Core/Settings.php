@@ -21,8 +21,14 @@ final class Settings {
 		return wp_parse_args(
 			get_option( self::OPTION, array() ),
 			array(
-				'worker_batch_size'        => 10,
+				'processing_enabled'        => true,
+				'worker_batch_size'        => 5,
+				'worker_time_budget'       => 20,
 				'poll_interval'            => 30,
+				'bot_poll_timeout'         => 1,
+				'poll_error_cooldown'      => 300,
+				'rss_batch_size'           => 5,
+				'queue_backpressure_limit' => 50,
 				'worker_timeout'           => 300,
 				'enable_wp_cron'           => true,
 				'media_group_wait'         => 8,
@@ -68,7 +74,7 @@ final class Settings {
 		$clean   = $current;
 
 		if ( 'worker_image' === ( $input['mrncb_scope'] ?? '' ) ) {
-			$booleans = array( 'enable_wp_cron', 'image_featured_enabled', 'image_inline_enabled' );
+			$booleans = array( 'processing_enabled', 'enable_wp_cron', 'image_featured_enabled', 'image_inline_enabled' );
 			foreach ( $booleans as $key ) {
 				$clean[ $key ] = ! empty( $input[ $key ] );
 			}
@@ -76,7 +82,12 @@ final class Settings {
 
 		$integers = array(
 			'worker_batch_size'        => array( 1, 100 ),
+			'worker_time_budget'       => array( 5, 300 ),
 			'poll_interval'            => array( 1, 300 ),
+			'bot_poll_timeout'         => array( 1, 2 ),
+			'poll_error_cooldown'      => array( 30, 3600 ),
+			'rss_batch_size'           => array( 1, 20 ),
+			'queue_backpressure_limit' => array( 5, 1000 ),
 			'worker_timeout'           => array( 30, 3600 ),
 			'media_group_wait'         => array( 2, 60 ),
 			'max_media_bytes'          => array( 1048576, 104857600 ),
@@ -127,5 +138,14 @@ final class Settings {
 		}
 
 		update_option( self::OPTION, $clean, false );
+	}
+
+	public function set_processing_enabled( bool $enabled ): void {
+		$settings                       = $this->all();
+		$settings['processing_enabled'] = $enabled;
+		if ( ! $enabled ) {
+			$settings['enable_wp_cron'] = false;
+		}
+		update_option( self::OPTION, $settings, false );
 	}
 }

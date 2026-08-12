@@ -27,7 +27,7 @@ abstract class AbstractBotApiAdapter implements PlatformAdapterInterface {
 	/** @return array<int, NormalizedUpdate> */
 	public function poll( object $source ): array {
 		$credentials = $this->entities->credentials( $source );
-		$timeout     = max( 1, min( 50, (int) $this->settings->get( 'poll_interval', 30 ) ) );
+		$timeout     = max( 1, min( 2, (int) $this->settings->get( 'bot_poll_timeout', 1 ) ) );
 		$result      = $this->request(
 			(string) ( $credentials['token'] ?? '' ),
 			'getUpdates',

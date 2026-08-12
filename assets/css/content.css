@@ -1,0 +1,93 @@
+.mrncb-pdf-viewer {
+	margin-block: 2rem;
+	overflow: hidden;
+	border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+	border-radius: 14px;
+	background: #fff;
+	box-shadow: 0 12px 32px rgb(15 23 42 / 8%);
+}
+
+.mrncb-pdf-viewer__frame {
+	display: block;
+	width: 100%;
+	height: clamp(32rem, 78vh, 60rem);
+	border: 0;
+}
+
+.mrncb-pdf-viewer figcaption {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.75rem;
+	padding: 0.8rem 1rem;
+	border-block-start: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+	font-size: 0.875rem;
+}
+
+.mrncb-download-card {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.9rem;
+	margin-block: 2rem 0;
+	padding: 1rem;
+	border: 1px solid color-mix(in srgb, #2563eb 24%, transparent);
+	border-radius: 14px;
+	background: color-mix(in srgb, #eff6ff 88%, transparent);
+	direction: rtl;
+}
+
+.mrncb-download-card__icon {
+	display: grid;
+	width: 3.1rem;
+	aspect-ratio: 1;
+	place-items: center;
+	border-radius: 12px;
+	background: #1d4ed8;
+	color: #fff;
+	font-size: 0.75rem;
+	font-weight: 800;
+	letter-spacing: 0.04em;
+}
+
+.mrncb-download-card__details {
+	display: grid;
+	min-width: 0;
+	flex: 1 1 12rem;
+	gap: 0.2rem;
+}
+
+.mrncb-download-card__details strong {
+	overflow-wrap: anywhere;
+}
+
+.mrncb-download-card__details small {
+	color: #64748b;
+}
+
+.mrncb-download-card__button {
+	padding: 0.65rem 1rem;
+	border-radius: 10px;
+	background: #1d4ed8;
+	color: #fff !important;
+	font-weight: 700;
+	text-decoration: none !important;
+}
+
+.mrncb-download-card__button:hover,
+.mrncb-download-card__button:focus-visible {
+	background: #1e40af;
+}
+
+@media (max-width: 42rem) {
+	.mrncb-pdf-viewer__frame {
+		height: 70vh;
+		min-height: 26rem;
+	}
+
+	.mrncb-download-card__button {
+		width: 100%;
+		text-align: center;
+	}
+}

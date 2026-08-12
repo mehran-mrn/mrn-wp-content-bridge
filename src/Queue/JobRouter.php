@@ -38,6 +38,7 @@ final class JobRouter {
 			'replace_image_placeholder' => $this->articles->replace_image_placeholder( $payload ),
 			'finalize_workflow' => $this->articles->finalize( absint( $payload['workflow_id'] ?? 0 ) ),
 			'request_approval'  => $this->approvals->request( absint( $payload['workflow_id'] ?? 0 ) ),
+			'request_category_selection' => $this->approvals->request_category( absint( $payload['workflow_id'] ?? 0 ) ),
 			'request_intake_confirmation' => $this->approvals->request_intake( absint( $payload['workflow_id'] ?? 0 ) ),
 			'publish_social'    => $this->social->publish( absint( $payload['post_id'] ?? 0 ), absint( $payload['destination_id'] ?? 0 ) ),
 			'send_notification' => $this->notifications->published( absint( $payload['workflow_id'] ?? 0 ) ),

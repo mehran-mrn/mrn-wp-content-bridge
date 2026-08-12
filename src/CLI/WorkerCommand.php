@@ -53,6 +53,12 @@ final class WorkerCommand {
 		$sleep = max( 1, absint( $assoc_args['sleep'] ?? $this->settings->get( 'poll_interval', 30 ) ) );
 
 		do {
+			if ( ! $this->settings->get( 'processing_enabled', true ) ) {
+				if ( ! $quiet ) {
+					\WP_CLI::warning( 'Content Bridge processing is disabled in plugin settings.' );
+				}
+				break;
+			}
 			$received = $this->poller->poll();
 			$result   = $this->worker->run( $batch );
 			if ( ! $quiet ) {
